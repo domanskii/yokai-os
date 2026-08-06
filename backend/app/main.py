@@ -31,7 +31,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.10.0")
+app = FastAPI(title="YOKAI OS API", version="0.11.0")
 
 
 class LoginRequest(BaseModel):
@@ -256,7 +256,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.10.0",
+        "version": "0.11.0",
         "status": "running",
     }
 
@@ -670,7 +670,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.10",
+                "User-Agent": "YOKAI-OS/0.11",
             },
             method="GET",
         )
@@ -1254,7 +1254,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.10",
+            "User-Agent": "YOKAI-OS/0.11",
         },
         method="GET",
     )
@@ -1408,7 +1408,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.10",
+            "User-Agent": "YOKAI-OS/0.11",
         },
         method="GET",
     )
@@ -2206,3 +2206,305 @@ def restore_material(
         conn.commit()
 
     return _material_result(material)
+
+
+# === YOKAI COST CALCULATOR V0.11 ===
+
+from psycopg.types.json import Jsonb as _CalcJsonb
+
+
+class CalculationMaterialLine(BaseModel):
+    material_id: int = Field(gt=0)
+    layers: Decimal = Field(default=Decimal("1"), gt=0, le=100)
+
+
+class CalculationCreate(BaseModel):
+    order_id: int | None = Field(default=None, gt=0)
+    name: str = Field(min_length=1, max_length=200)
+    width_cm: Decimal = Field(gt=0, le=10000)
+    height_cm: Decimal = Field(gt=0, le=10000)
+    quantity: int = Field(default=1, ge=1, le=1000000)
+    waste_percent: Decimal = Field(default=Decimal("15"), ge=0, le=500)
+    labor_minutes: Decimal = Field(default=Decimal("0"), ge=0, le=100000)
+    hourly_rate: Decimal = Field(default=Decimal("50"), ge=0, le=100000)
+    margin_percent: Decimal = Field(default=Decimal("40"), ge=0, lt=100)
+    materials: list[CalculationMaterialLine] = Field(min_length=1)
+    deduct_stock: bool = False
+    update_order_price: bool = False
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+def _ensure_calculator_schema(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calculations (
+            id BIGSERIAL PRIMARY KEY,
+            calculation_number TEXT UNIQUE,
+            order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL,
+            name TEXT NOT NULL,
+            width_cm NUMERIC(12,3) NOT NULL,
+            height_cm NUMERIC(12,3) NOT NULL,
+            quantity INTEGER NOT NULL,
+            waste_percent NUMERIC(8,3) NOT NULL,
+            labor_minutes NUMERIC(12,2) NOT NULL,
+            hourly_rate NUMERIC(12,2) NOT NULL,
+            margin_percent NUMERIC(8,3) NOT NULL,
+            base_area_m2 NUMERIC(16,6) NOT NULL,
+            material_cost NUMERIC(14,2) NOT NULL,
+            labor_cost NUMERIC(14,2) NOT NULL,
+            total_cost NUMERIC(14,2) NOT NULL,
+            suggested_price NUMERIC(14,2) NOT NULL,
+            profit NUMERIC(14,2) NOT NULL,
+            material_breakdown JSONB NOT NULL DEFAULT '[]'::jsonb,
+            stock_deducted BOOLEAN NOT NULL DEFAULT FALSE,
+            order_price_updated BOOLEAN NOT NULL DEFAULT FALSE,
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
+
+def _calc_decimal(value: object) -> Decimal:
+    return Decimal(str(value or 0))
+
+
+def _calc_money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"))
+
+
+def _calculation_result(row: dict) -> dict:
+    result = dict(row)
+    for field in (
+        "width_cm", "height_cm", "waste_percent", "labor_minutes",
+        "hourly_rate", "margin_percent", "base_area_m2",
+        "material_cost", "labor_cost", "total_cost",
+        "suggested_price", "profit",
+    ):
+        result[field] = float(_calc_decimal(result.get(field)))
+    return result
+
+
+def _calculate_order_cost(cur, data: CalculationCreate) -> dict:
+    base_area = (
+        data.width_cm / Decimal("100")
+        * data.height_cm / Decimal("100")
+        * Decimal(data.quantity)
+    )
+    waste_factor = Decimal("1") + data.waste_percent / Decimal("100")
+    material_ids = [line.material_id for line in data.materials]
+
+    cur.execute(
+        """
+        SELECT *
+        FROM materials
+        WHERE id = ANY(%s) AND is_archived = FALSE
+        """,
+        (material_ids,),
+    )
+    rows = {int(row["id"]): row for row in cur.fetchall()}
+
+    missing = sorted(set(material_ids) - set(rows))
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail="Brak aktywnych materiałów: " + ", ".join(map(str, missing)),
+        )
+
+    material_cost = Decimal("0")
+    deductions: dict[int, Decimal] = {}
+    breakdown: list[dict] = []
+
+    for line in data.materials:
+        material = rows[line.material_id]
+        roll_width_m = _calc_decimal(material["width_cm"]) / Decimal("100")
+        roll_length_m = _calc_decimal(material["roll_length_m"])
+        purchase_price = _calc_decimal(material["purchase_price"])
+        available_m = _calc_decimal(material["stock_length_m"])
+
+        if roll_width_m <= 0 or roll_length_m <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nieprawidłowy rozmiar rolki: {material['name']}",
+            )
+
+        cost_per_m2 = purchase_price / (roll_width_m * roll_length_m)
+        used_area = base_area * line.layers * waste_factor
+        used_length = used_area / roll_width_m
+        line_cost = used_area * cost_per_m2
+
+        material_cost += line_cost
+        deductions[line.material_id] = (
+            deductions.get(line.material_id, Decimal("0")) + used_length
+        )
+        breakdown.append(
+            {
+                "material_id": int(material["id"]),
+                "name": material["name"],
+                "color_name": material["color_name"],
+                "color_code": material["color_code"],
+                "layers": float(line.layers),
+                "used_area_m2": round(float(used_area), 6),
+                "used_length_m": round(float(used_length), 4),
+                "cost_per_m2": round(float(cost_per_m2), 4),
+                "cost": round(float(line_cost), 2),
+                "stock_before_m": float(available_m),
+            }
+        )
+
+    if data.deduct_stock:
+        for material_id, required_m in deductions.items():
+            available_m = _calc_decimal(rows[material_id]["stock_length_m"])
+            if required_m > available_m:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Za mało materiału: {rows[material_id]['name']}. "
+                        f"Potrzeba {required_m.quantize(Decimal('0.01'))} m, "
+                        f"dostępne {available_m.quantize(Decimal('0.01'))} m."
+                    ),
+                )
+
+    labor_cost = data.labor_minutes / Decimal("60") * data.hourly_rate
+    total_cost = material_cost + labor_cost
+    suggested_price = total_cost / (
+        Decimal("1") - data.margin_percent / Decimal("100")
+    )
+    profit = suggested_price - total_cost
+
+    return {
+        "base_area": base_area,
+        "material_cost": _calc_money(material_cost),
+        "labor_cost": _calc_money(labor_cost),
+        "total_cost": _calc_money(total_cost),
+        "suggested_price": _calc_money(suggested_price),
+        "profit": _calc_money(profit),
+        "breakdown": breakdown,
+        "deductions": deductions,
+    }
+
+
+@app.get("/calculations")
+def list_calculations(
+    limit: int = Query(default=30, ge=1, le=500),
+    order_id: int | None = Query(default=None, gt=0),
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_calculator_schema(cur)
+            if order_id:
+                cur.execute(
+                    """
+                    SELECT c.*, o.order_number, o.client_name
+                    FROM calculations c
+                    LEFT JOIN orders o ON o.id = c.order_id
+                    WHERE c.order_id = %s
+                    ORDER BY c.created_at DESC
+                    LIMIT %s
+                    """,
+                    (order_id, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT c.*, o.order_number, o.client_name
+                    FROM calculations c
+                    LEFT JOIN orders o ON o.id = c.order_id
+                    ORDER BY c.created_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            rows = cur.fetchall()
+        conn.commit()
+    return [_calculation_result(row) for row in rows]
+
+
+@app.post("/calculations", status_code=status.HTTP_201_CREATED)
+def create_calculation(
+    data: CalculationCreate,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_calculator_schema(cur)
+
+            if data.order_id:
+                cur.execute(
+                    "SELECT id FROM orders WHERE id = %s AND is_archived = FALSE",
+                    (data.order_id,),
+                )
+                if cur.fetchone() is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Nie znaleziono aktywnego zamówienia",
+                    )
+
+            totals = _calculate_order_cost(cur, data)
+
+            if data.deduct_stock:
+                for material_id, used_length in totals["deductions"].items():
+                    cur.execute(
+                        """
+                        UPDATE materials
+                        SET stock_length_m = stock_length_m - %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (used_length, material_id),
+                    )
+
+            cur.execute(
+                """
+                INSERT INTO calculations (
+                    order_id, name, width_cm, height_cm, quantity,
+                    waste_percent, labor_minutes, hourly_rate, margin_percent,
+                    base_area_m2, material_cost, labor_cost, total_cost,
+                    suggested_price, profit, material_breakdown,
+                    stock_deducted, order_price_updated, notes
+                )
+                VALUES (
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                )
+                RETURNING id
+                """,
+                (
+                    data.order_id, data.name.strip(), data.width_cm,
+                    data.height_cm, data.quantity, data.waste_percent,
+                    data.labor_minutes, data.hourly_rate, data.margin_percent,
+                    totals["base_area"], totals["material_cost"],
+                    totals["labor_cost"], totals["total_cost"],
+                    totals["suggested_price"], totals["profit"],
+                    _CalcJsonb(totals["breakdown"]), data.deduct_stock,
+                    data.update_order_price, data.notes.strip() if data.notes else None,
+                ),
+            )
+            calculation_id = cur.fetchone()["id"]
+            calculation_number = f"YK-C-{calculation_id:05d}"
+
+            cur.execute(
+                "UPDATE calculations SET calculation_number = %s WHERE id = %s",
+                (calculation_number, calculation_id),
+            )
+
+            if data.order_id and data.update_order_price:
+                cur.execute(
+                    "UPDATE orders SET price = %s, updated_at = NOW() WHERE id = %s",
+                    (totals["suggested_price"], data.order_id),
+                )
+
+            cur.execute(
+                """
+                SELECT c.*, o.order_number, o.client_name
+                FROM calculations c
+                LEFT JOIN orders o ON o.id = c.order_id
+                WHERE c.id = %s
+                """,
+                (calculation_id,),
+            )
+            result = cur.fetchone()
+        conn.commit()
+
+    return _calculation_result(result)

@@ -130,7 +130,7 @@ const nav: NavItem[] = [
   {
     label: "Kalkulator",
     icon: CircleDollarSign,
-    href: "/",
+    href: "/calculator",
   },
   {
     label: "Materiały",

@@ -81,7 +81,7 @@ const nav = [
   { label: "Produkcja", icon: Zap, href: "/production" },
   { label: "Zamówienia", icon: ShoppingBag, href: "/orders" },
   { label: "Biblioteka SVG", icon: FileImage, href: "/" },
-  { label: "Kalkulator", icon: CircleDollarSign, href: "/" },
+  { label: "Kalkulator", icon: CircleDollarSign, href: "/calculator" },
   { label: "Materiały", icon: Boxes, href: "/materials" },
   { label: "Klienci", icon: Users, href: "/" },
   { label: "AI Studio", icon: WandSparkles, href: "/" },
