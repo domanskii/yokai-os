@@ -1,5 +1,7 @@
 "use client";
 
+import { ManualOrderClientSearch } from "../../components/manual-order-client-search";
+
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -285,11 +287,14 @@ function NewOrderModal({
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="field">
             <span>Klient</span>
-            <input
+            <div className="relative">
+              <input id="manual-order-client-name"
               value={form.client_name}
               onChange={(event) => update("client_name", event.target.value)}
               placeholder="Imię lub firma"
             />
+              <ManualOrderClientSearch inputId="manual-order-client-name" />
+            </div>
           </label>
           <label className="field">
             <span>Źródło</span>

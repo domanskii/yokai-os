@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.16.0")
+app = FastAPI(title="YOKAI OS API", version="0.17.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.16.0",
+        "version": "0.17.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.16",
+                "User-Agent": "YOKAI-OS/0.17",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.16",
+            "User-Agent": "YOKAI-OS/0.17",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.16",
+            "User-Agent": "YOKAI-OS/0.17",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.16",
+            "User-Agent": "YOKAI-OS/0.17",
         },
     )
 
@@ -4714,3 +4714,141 @@ def assign_client_to_order(
         conn.commit()
 
     return order
+
+# === YOKAI CLIENT SEARCH AND SVG PICKER V0.17 ===
+
+
+class AssignSvgAssetToOrder(BaseModel):
+    order_id: int = Field(gt=0)
+
+
+@app.on_event("startup")
+def startup_client_autolink():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE OR REPLACE FUNCTION
+                yokai_assign_client_by_name()
+                RETURNS TRIGGER AS $$
+                DECLARE
+                    matched_client_id BIGINT;
+                BEGIN
+                    IF NEW.client_id IS NULL
+                       AND NULLIF(
+                           BTRIM(
+                               COALESCE(
+                                   NEW.client_name,
+                                   ''
+                               )
+                           ),
+                           ''
+                       ) IS NOT NULL
+                    THEN
+                        SELECT id
+                        INTO matched_client_id
+                        FROM clients
+                        WHERE is_archived = FALSE
+                          AND LOWER(
+                              BTRIM(display_name)
+                          ) = LOWER(
+                              BTRIM(
+                                  NEW.client_name
+                              )
+                          )
+                        ORDER BY id
+                        LIMIT 1;
+
+                        IF matched_client_id
+                           IS NOT NULL
+                        THEN
+                            NEW.client_id :=
+                                matched_client_id;
+                        END IF;
+                    END IF;
+
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+
+            cur.execute(
+                """
+                DROP TRIGGER IF EXISTS
+                orders_assign_client_by_name
+                ON orders
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TRIGGER
+                orders_assign_client_by_name
+                BEFORE INSERT OR UPDATE OF
+                    client_name,
+                    client_id
+                ON orders
+                FOR EACH ROW
+                EXECUTE FUNCTION
+                    yokai_assign_client_by_name()
+                """
+            )
+
+        conn.commit()
+
+
+@app.post(
+    "/svg-assets/{asset_id}/assign-order"
+)
+def assign_svg_asset_to_order(
+    asset_id: int,
+    data: AssignSvgAssetToOrder,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            asset = _get_svg_or_404(
+                cur,
+                asset_id,
+            )
+
+            if asset["is_archived"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Nie można przypisać "
+                        "zarchiwizowanego projektu"
+                    ),
+                )
+
+            order = get_order_or_404(
+                cur,
+                data.order_id,
+            )
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET
+                    order_id = %s,
+                    client_name = %s,
+                    is_production_ready = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    data.order_id,
+                    order["client_name"],
+                    asset_id,
+                ),
+            )
+
+            result = _get_svg_or_404(
+                cur,
+                asset_id,
+            )
+
+        conn.commit()
+
+    return _svg_result(result)

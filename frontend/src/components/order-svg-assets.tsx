@@ -2,15 +2,19 @@
 
 import {
   useEffect,
+  useMemo,
   useState,
 } from "react";
 import {
   CheckCircle2,
   Download,
   FileImage,
+  FolderSearch,
+  Library,
   LoaderCircle,
   PackageCheck,
   Plus,
+  Search,
   Upload,
   X,
 } from "lucide-react";
@@ -22,6 +26,10 @@ type SvgAsset = {
   original_filename: string;
   file_size: number;
   category: string;
+  tags: string[];
+  client_name: string;
+  order_id: number | null;
+  order_number: string | null;
   version_label: string;
   is_production_ready: boolean;
 };
@@ -31,12 +39,22 @@ async function readError(
   fallback: string
 ) {
   const contentType =
-    response.headers.get("content-type") || "";
+    response.headers.get(
+      "content-type"
+    ) || "";
 
-  if (contentType.includes("application/json")) {
-    const data = await response.json();
+  if (
+    contentType.includes(
+      "application/json"
+    )
+  ) {
+    const data =
+      await response.json();
 
-    if (typeof data.detail === "string") {
+    if (
+      typeof data.detail
+      === "string"
+    ) {
       return data.detail;
     }
   } else {
@@ -46,11 +64,19 @@ async function readError(
   return fallback;
 }
 
-function formatFileSize(value: number) {
-  if (value < 1024) return `${value} B`;
+function formatFileSize(
+  value: number
+) {
+  if (value < 1024) {
+    return `${value} B`;
+  }
 
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
+  if (
+    value < 1024 * 1024
+  ) {
+    return `${(
+      value / 1024
+    ).toFixed(1)} KB`;
   }
 
   return `${(
@@ -60,8 +86,11 @@ function formatFileSize(value: number) {
 
 function AuthSvgPreview({
   assetId,
+  className =
+    "size-24",
 }: {
   assetId: number;
+  className?: string;
 }) {
   const [url, setUrl] =
     useState("");
@@ -75,7 +104,9 @@ function AuthSvgPreview({
 
     const load = async () => {
       const token =
-        localStorage.getItem("yokai_token");
+        localStorage.getItem(
+          "yokai_token"
+        );
 
       if (!token) {
         setFailed(true);
@@ -83,23 +114,26 @@ function AuthSvgPreview({
       }
 
       try {
-        const response = await fetch(
-          `/api/svg-assets/${assetId}/file`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-            cache: "no-store",
-          }
-        );
+        const response =
+          await fetch(
+            `/api/svg-assets/${assetId}/file`,
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+              },
+              cache: "no-store",
+            }
+          );
 
         if (!response.ok) {
           throw new Error();
         }
 
-        objectUrl = URL.createObjectURL(
-          await response.blob()
-        );
+        objectUrl =
+          URL.createObjectURL(
+            await response.blob()
+          );
 
         if (!cancelled) {
           setUrl(objectUrl);
@@ -117,19 +151,25 @@ function AuthSvgPreview({
       cancelled = true;
 
       if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
+        URL.revokeObjectURL(
+          objectUrl
+        );
       }
     };
   }, [assetId]);
 
   return (
-    <div className="grid size-24 shrink-0 place-items-center overflow-hidden rounded-2xl border border-white/[.07] bg-white/[.025]">
+    <div
+      className={`grid shrink-0 place-items-center overflow-hidden rounded-2xl border border-white/[.07] bg-white/[.025] ${className}`}
+    >
       {url && !failed ? (
         <img
           src={url}
           alt="Podgląd SVG"
           className="size-full object-contain p-3"
-          onError={() => setFailed(true)}
+          onError={() =>
+            setFailed(true)
+          }
         />
       ) : failed ? (
         <FileImage className="size-8 text-white/15" />
@@ -152,16 +192,22 @@ function UploadOrderSvg({
   onCreated: () => void;
 }) {
   const [file, setFile] =
-    useState<File | null>(null);
+    useState<File | null>(
+      null
+    );
 
   const [name, setName] =
     useState("");
 
-  const [version, setVersion] =
-    useState("v1");
+  const [
+    version,
+    setVersion,
+  ] = useState("v1");
 
-  const [category, setCategory] =
-    useState("Grafika");
+  const [
+    category,
+    setCategory,
+  ] = useState("Grafika");
 
   const [tags, setTags] =
     useState("");
@@ -178,15 +224,21 @@ function UploadOrderSvg({
     event.preventDefault();
 
     if (!file) {
-      setError("Wybierz plik SVG");
+      setError(
+        "Wybierz plik SVG"
+      );
       return;
     }
 
     const token =
-      localStorage.getItem("yokai_token");
+      localStorage.getItem(
+        "yokai_token"
+      );
 
     if (!token) {
-      setError("Sesja wygasła");
+      setError(
+        "Sesja wygasła"
+      );
       return;
     }
 
@@ -194,31 +246,62 @@ function UploadOrderSvg({
     setError("");
 
     try {
-      const body = new FormData();
+      const body =
+        new FormData();
 
       body.append("file", file);
+
       body.append(
         "name",
         name.trim()
-          || file.name.replace(/\.svg$/i, "")
+          || file.name.replace(
+            /\.svg$/i,
+            ""
+          )
       );
-      body.append("category", category);
-      body.append("tags", tags);
-      body.append("client_name", clientName);
-      body.append("order_id", String(orderId));
-      body.append("version_label", version);
-      body.append("notes", "");
 
-      const response = await fetch(
-        "/api/svg-assets",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          body,
-        }
+      body.append(
+        "category",
+        category
       );
+
+      body.append(
+        "tags",
+        tags
+      );
+
+      body.append(
+        "client_name",
+        clientName
+      );
+
+      body.append(
+        "order_id",
+        String(orderId)
+      );
+
+      body.append(
+        "version_label",
+        version
+      );
+
+      body.append(
+        "notes",
+        ""
+      );
+
+      const response =
+        await fetch(
+          "/api/svg-assets",
+          {
+            method: "POST",
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+            },
+            body,
+          }
+        );
 
       if (!response.ok) {
         throw new Error(
@@ -230,9 +313,12 @@ function UploadOrderSvg({
       }
 
       onCreated();
-    } catch (uploadError) {
+    } catch (
+      uploadError
+    ) {
       setError(
-        uploadError instanceof Error
+        uploadError
+          instanceof Error
           ? uploadError.message
           : "Nie udało się dodać SVG"
       );
@@ -256,7 +342,7 @@ function UploadOrderSvg({
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-xs font-semibold uppercase tracking-[.18em] text-violet-300/70">
-              Projekt do zamówienia
+              Nowy projekt
             </div>
 
             <h2 className="mt-2 text-2xl font-semibold">
@@ -278,22 +364,28 @@ function UploadOrderSvg({
             type="file"
             accept=".svg,image/svg+xml"
             className="hidden"
-            onChange={(event) => {
+            onChange={(
+              event
+            ) => {
               const selected =
-                event.target.files?.[0]
+                event.target
+                  .files?.[0]
                 || null;
 
-              setFile(selected);
+              setFile(
+                selected
+              );
 
               if (
                 selected
                 && !name.trim()
               ) {
                 setName(
-                  selected.name.replace(
-                    /\.svg$/i,
-                    ""
-                  )
+                  selected.name
+                    .replace(
+                      /\.svg$/i,
+                      ""
+                    )
                 );
               }
             }}
@@ -312,13 +404,19 @@ function UploadOrderSvg({
 
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="field sm:col-span-2">
-            <span>Nazwa projektu</span>
+            <span>
+              Nazwa projektu
+            </span>
 
             <input
               required
               value={name}
-              onChange={(event) =>
-                setName(event.target.value)
+              onChange={(
+                event
+              ) =>
+                setName(
+                  event.target.value
+                )
               }
             />
           </label>
@@ -328,27 +426,49 @@ function UploadOrderSvg({
 
             <input
               value={version}
-              onChange={(event) =>
-                setVersion(event.target.value)
+              onChange={(
+                event
+              ) =>
+                setVersion(
+                  event.target.value
+                )
               }
             />
           </label>
 
           <label className="field">
-            <span>Kategoria</span>
+            <span>
+              Kategoria
+            </span>
 
             <select
               value={category}
-              onChange={(event) =>
-                setCategory(event.target.value)
+              onChange={(
+                event
+              ) =>
+                setCategory(
+                  event.target.value
+                )
               }
             >
-              <option>Grafika</option>
-              <option>Logo</option>
-              <option>Tekst</option>
-              <option>Naklejka social media</option>
-              <option>Motoryzacja</option>
-              <option>Inne</option>
+              <option>
+                Grafika
+              </option>
+              <option>
+                Logo
+              </option>
+              <option>
+                Tekst
+              </option>
+              <option>
+                Naklejka social media
+              </option>
+              <option>
+                Motoryzacja
+              </option>
+              <option>
+                Inne
+              </option>
             </select>
           </label>
 
@@ -357,8 +477,12 @@ function UploadOrderSvg({
 
             <input
               value={tags}
-              onChange={(event) =>
-                setTags(event.target.value)
+              onChange={(
+                event
+              ) =>
+                setTags(
+                  event.target.value
+                )
               }
               placeholder="np. instagram, nfc, final"
             />
@@ -396,6 +520,344 @@ function UploadOrderSvg({
   );
 }
 
+function LibraryPicker({
+  orderId,
+  assignedIds,
+  onClose,
+  onAssigned,
+}: {
+  orderId: number;
+  assignedIds: number[];
+  onClose: () => void;
+  onAssigned: () => void;
+}) {
+  const [assets, setAssets] =
+    useState<SvgAsset[]>([]);
+
+  const [search, setSearch] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [busyId, setBusyId] =
+    useState<number | null>(
+      null
+    );
+
+  const [error, setError] =
+    useState("");
+
+  useEffect(() => {
+    const token =
+      localStorage.getItem(
+        "yokai_token"
+      );
+
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+
+    const load = async () => {
+      try {
+        const response =
+          await fetch(
+            "/api/svg-assets?archived=false&limit=1000",
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+              },
+              cache: "no-store",
+            }
+          );
+
+        if (!response.ok) {
+          throw new Error(
+            await readError(
+              response,
+              "Nie udało się pobrać biblioteki"
+            )
+          );
+        }
+
+        setAssets(
+          await response.json()
+        );
+      } catch (
+        loadError
+      ) {
+        setError(
+          loadError
+            instanceof Error
+            ? loadError.message
+            : "Nie udało się pobrać biblioteki"
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void load();
+  }, []);
+
+  const visible =
+    useMemo(() => {
+      const phrase =
+        search
+          .trim()
+          .toLocaleLowerCase(
+            "pl"
+          );
+
+      return assets.filter(
+        (asset) => {
+          if (
+            assignedIds.includes(
+              asset.id
+            )
+          ) {
+            return false;
+          }
+
+          if (!phrase) {
+            return true;
+          }
+
+          return [
+            asset.asset_number,
+            asset.name,
+            asset.category,
+            asset.client_name,
+            asset.order_number
+              || "",
+            asset.version_label,
+            ...(
+              asset.tags
+              || []
+            ),
+          ]
+            .join(" ")
+            .toLocaleLowerCase(
+              "pl"
+            )
+            .includes(
+              phrase
+            );
+        }
+      );
+    }, [
+      assets,
+      search,
+      assignedIds,
+    ]);
+
+  const assign = async (
+    asset: SvgAsset
+  ) => {
+    const token =
+      localStorage.getItem(
+        "yokai_token"
+      );
+
+    if (!token) {
+      return;
+    }
+
+    setBusyId(
+      asset.id
+    );
+
+    setError("");
+
+    try {
+      const response =
+        await fetch(
+          `/api/svg-assets/${asset.id}/assign-order`,
+          {
+            method: "POST",
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              order_id: orderId,
+            }),
+          }
+        );
+
+      if (!response.ok) {
+        throw new Error(
+          await readError(
+            response,
+            "Nie udało się przypisać projektu"
+          )
+        );
+      }
+
+      onAssigned();
+    } catch (
+      assignError
+    ) {
+      setError(
+        assignError
+          instanceof Error
+          ? assignError.message
+          : "Nie udało się przypisać projektu"
+      );
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-4 backdrop-blur-md">
+      <button
+        className="absolute inset-0"
+        onClick={onClose}
+        aria-label="Zamknij"
+      />
+
+      <section className="surface-card relative z-10 flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden">
+        <div className="flex items-start justify-between gap-4 border-b border-white/[.06] p-5 sm:p-7">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[.18em] text-violet-300/70">
+              Istniejące projekty
+            </div>
+
+            <h2 className="mt-2 text-2xl font-semibold">
+              Wybierz z biblioteki SVG
+            </h2>
+          </div>
+
+          <button
+            onClick={onClose}
+            className="icon-button"
+          >
+            <X className="size-5" />
+          </button>
+        </div>
+
+        <div className="border-b border-white/[.06] p-4 sm:p-5">
+          <label className="relative block">
+            <Search className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-white/30" />
+
+            <input
+              autoFocus
+              value={search}
+              onChange={(
+                event
+              ) =>
+                setSearch(
+                  event.target.value
+                )
+              }
+              className="h-11 w-full rounded-2xl border border-white/[.08] bg-white/[.03] pl-11 pr-4 text-sm outline-none focus:border-violet-400/45"
+              placeholder="Szukaj nazwy, klienta, numeru SVG, tagu lub zamówienia..."
+            />
+          </label>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+          {loading ? (
+            <div className="grid min-h-72 place-items-center">
+              <LoaderCircle className="size-7 animate-spin text-white/25" />
+            </div>
+          ) : visible.length === 0 ? (
+            <div className="grid min-h-72 place-items-center text-center">
+              <div>
+                <FolderSearch className="mx-auto size-10 text-white/15" />
+
+                <div className="mt-4 font-medium">
+                  Brak pasujących projektów
+                </div>
+
+                <div className="mt-2 text-sm text-white/35">
+                  Zmień wyszukiwanie albo dodaj nowy SVG.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {visible.map(
+                (asset) => (
+                  <article
+                    key={asset.id}
+                    className="flex gap-4 rounded-3xl border border-white/[.065] bg-white/[.02] p-4"
+                  >
+                    <AuthSvgPreview
+                      assetId={asset.id}
+                      className="size-24"
+                    />
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="truncate font-semibold text-white/90">
+                          {asset.name}
+                        </div>
+
+                        <span className="rounded-full border border-white/[.08] px-2 py-1 text-[10px] text-white/45">
+                          {asset.version_label}
+                        </span>
+                      </div>
+
+                      <div className="mt-2 text-xs text-white/35">
+                        {asset.asset_number}
+                        {" · "}
+                        {asset.category}
+                      </div>
+
+                      <div className="mt-1 truncate text-xs text-white/30">
+                        {asset.client_name
+                          || "Bez klienta"}
+
+                        {asset.order_number
+                          ? ` · obecnie ${asset.order_number}`
+                          : " · bez zamówienia"}
+                      </div>
+
+                      <button
+                        onClick={() =>
+                          void assign(
+                            asset
+                          )
+                        }
+                        disabled={
+                          busyId
+                          === asset.id
+                        }
+                        className="secondary-button compact mt-4 border-violet-400/20 text-violet-200 disabled:opacity-60"
+                      >
+                        {busyId
+                          === asset.id ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Library className="size-4" />
+                        )}
+
+                        Przypisz do zamówienia
+                      </button>
+                    </div>
+                  </article>
+                )
+              )}
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-400/[.06] px-4 py-3 text-sm text-red-200">
+              {error}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function OrderSvgAssets({
   orderId,
   clientName,
@@ -412,8 +874,15 @@ export function OrderSvgAssets({
   const [uploadOpen, setUploadOpen] =
     useState(false);
 
+  const [
+    libraryOpen,
+    setLibraryOpen,
+  ] = useState(false);
+
   const [busyId, setBusyId] =
-    useState<number | null>(null);
+    useState<number | null>(
+      null
+    );
 
   const [message, setMessage] =
     useState("");
@@ -423,23 +892,29 @@ export function OrderSvgAssets({
 
   const load = async () => {
     const token =
-      localStorage.getItem("yokai_token");
+      localStorage.getItem(
+        "yokai_token"
+      );
 
-    if (!token) return;
+    if (!token) {
+      return;
+    }
 
     setLoading(true);
     setError("");
 
     try {
-      const response = await fetch(
-        `/api/orders/${orderId}/svg-assets`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          cache: "no-store",
-        }
-      );
+      const response =
+        await fetch(
+          `/api/orders/${orderId}/svg-assets`,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+            },
+            cache: "no-store",
+          }
+        );
 
       if (!response.ok) {
         throw new Error(
@@ -450,10 +925,15 @@ export function OrderSvgAssets({
         );
       }
 
-      setAssets(await response.json());
-    } catch (loadError) {
+      setAssets(
+        await response.json()
+      );
+    } catch (
+      loadError
+    ) {
       setError(
-        loadError instanceof Error
+        loadError
+          instanceof Error
           ? loadError.message
           : "Nie udało się pobrać projektów"
       );
@@ -470,23 +950,32 @@ export function OrderSvgAssets({
     assetId: number
   ) => {
     const token =
-      localStorage.getItem("yokai_token");
+      localStorage.getItem(
+        "yokai_token"
+      );
 
-    if (!token) return;
+    if (!token) {
+      return;
+    }
 
-    setBusyId(assetId);
+    setBusyId(
+      assetId
+    );
+
     setError("");
 
     try {
-      const response = await fetch(
-        `/api/svg-assets/${assetId}/set-production-ready`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
+      const response =
+        await fetch(
+          `/api/svg-assets/${assetId}/set-production-ready`,
+          {
+            method: "POST",
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+            },
+          }
+        );
 
       if (!response.ok) {
         throw new Error(
@@ -497,7 +986,9 @@ export function OrderSvgAssets({
         );
       }
 
-      setMessage("Ustawiono plik produkcyjny");
+      setMessage(
+        "Ustawiono plik produkcyjny"
+      );
 
       window.setTimeout(
         () => setMessage(""),
@@ -505,9 +996,12 @@ export function OrderSvgAssets({
       );
 
       await load();
-    } catch (readyError) {
+    } catch (
+      readyError
+    ) {
       setError(
-        readyError instanceof Error
+        readyError
+          instanceof Error
           ? readyError.message
           : "Operacja nie powiodła się"
       );
@@ -520,18 +1014,24 @@ export function OrderSvgAssets({
     asset: SvgAsset
   ) => {
     const token =
-      localStorage.getItem("yokai_token");
+      localStorage.getItem(
+        "yokai_token"
+      );
 
-    if (!token) return;
+    if (!token) {
+      return;
+    }
 
-    const response = await fetch(
-      `/api/svg-assets/${asset.id}/file?download=true`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
+    const response =
+      await fetch(
+        `/api/svg-assets/${asset.id}/file?download=true`,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+          },
+        }
+      );
 
     if (!response.ok) {
       setError(
@@ -540,24 +1040,46 @@ export function OrderSvgAssets({
           "Nie udało się pobrać SVG"
         )
       );
+
       return;
     }
 
-    const url = URL.createObjectURL(
-      await response.blob()
-    );
+    const url =
+      URL.createObjectURL(
+        await response.blob()
+      );
 
     const link =
-      document.createElement("a");
+      document.createElement(
+        "a"
+      );
 
     link.href = url;
-    link.download = asset.original_filename;
 
-    document.body.appendChild(link);
+    link.download =
+      asset.original_filename;
+
+    document.body.appendChild(
+      link
+    );
+
     link.click();
     link.remove();
 
     URL.revokeObjectURL(url);
+  };
+
+  const success = (
+    text: string
+  ) => {
+    setMessage(text);
+
+    window.setTimeout(
+      () => setMessage(""),
+      2400
+    );
+
+    void load();
   };
 
   return (
@@ -571,17 +1093,35 @@ export function OrderSvgAssets({
             </div>
 
             <div className="mt-1 text-xs text-white/35">
-              Pliki przypisane do tego zamówienia.
+              Dodaj nowy plik albo wybierz istniejący projekt z biblioteki.
             </div>
           </div>
 
-          <button
-            onClick={() => setUploadOpen(true)}
-            className="secondary-button self-start sm:self-auto"
-          >
-            <Plus className="size-4" />
-            Dodaj SVG
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() =>
+                setLibraryOpen(
+                  true
+                )
+              }
+              className="secondary-button"
+            >
+              <Library className="size-4" />
+              Wybierz z biblioteki
+            </button>
+
+            <button
+              onClick={() =>
+                setUploadOpen(
+                  true
+                )
+              }
+              className="secondary-button"
+            >
+              <Plus className="size-4" />
+              Dodaj nowy SVG
+            </button>
+          </div>
         </div>
 
         {loading ? (
@@ -598,68 +1138,85 @@ export function OrderSvgAssets({
               </div>
 
               <div className="mt-1 text-xs text-white/35">
-                Dodaj plik lub przypisz go z Biblioteki SVG.
+                Wybierz istniejący projekt z biblioteki albo wgraj nowy.
               </div>
             </div>
           </div>
         ) : (
           <div className="divide-y divide-white/[.055]">
-            {assets.map((asset) => (
-              <article
-                key={asset.id}
-                className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center"
-              >
-                <AuthSvgPreview assetId={asset.id} />
+            {assets.map(
+              (asset) => (
+                <article
+                  key={asset.id}
+                  className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center"
+                >
+                  <AuthSvgPreview
+                    assetId={asset.id}
+                  />
 
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="font-semibold text-white/90">
-                      {asset.name}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="font-semibold text-white/90">
+                        {asset.name}
+                      </div>
+
+                      <span className="rounded-full border border-white/[.08] bg-white/[.03] px-2 py-1 text-[10px] text-white/45">
+                        {asset.version_label}
+                      </span>
+
+                      {asset.is_production_ready && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/25 bg-emerald-400/[.07] px-2 py-1 text-[10px] text-emerald-200">
+                          <CheckCircle2 className="size-3" />
+                          Produkcyjny
+                        </span>
+                      )}
                     </div>
 
-                    <span className="rounded-full border border-white/[.08] bg-white/[.03] px-2 py-1 text-[10px] text-white/45">
-                      {asset.version_label}
-                    </span>
+                    <div className="mt-2 text-xs text-white/35">
+                      {asset.asset_number}
+                      {" · "}
+                      {asset.category}
+                      {" · "}
+                      {formatFileSize(
+                        asset.file_size
+                      )}
+                    </div>
+                  </div>
 
-                    {asset.is_production_ready && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/25 bg-emerald-400/[.07] px-2 py-1 text-[10px] text-emerald-200">
-                        <CheckCircle2 className="size-3" />
-                        Produkcyjny
-                      </span>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() =>
+                        void download(
+                          asset
+                        )
+                      }
+                      className="secondary-button compact"
+                    >
+                      <Download className="size-4" />
+                      Pobierz
+                    </button>
+
+                    {!asset.is_production_ready && (
+                      <button
+                        onClick={() =>
+                          void setReady(
+                            asset.id
+                          )
+                        }
+                        disabled={
+                          busyId
+                          === asset.id
+                        }
+                        className="secondary-button compact border-emerald-400/20 text-emerald-200 disabled:opacity-60"
+                      >
+                        <PackageCheck className="size-4" />
+                        Ustaw produkcyjny
+                      </button>
                     )}
                   </div>
-
-                  <div className="mt-2 text-xs text-white/35">
-                    {asset.asset_number}
-                    {" · "}
-                    {asset.category}
-                    {" · "}
-                    {formatFileSize(asset.file_size)}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void download(asset)}
-                    className="secondary-button compact"
-                  >
-                    <Download className="size-4" />
-                    Pobierz
-                  </button>
-
-                  {!asset.is_production_ready && (
-                    <button
-                      onClick={() => void setReady(asset.id)}
-                      disabled={busyId === asset.id}
-                      className="secondary-button compact border-emerald-400/20 text-emerald-200 disabled:opacity-60"
-                    >
-                      <PackageCheck className="size-4" />
-                      Ustaw produkcyjny
-                    </button>
-                  )}
-                </div>
-              </article>
-            ))}
+                </article>
+              )
+            )}
           </div>
         )}
 
@@ -680,17 +1237,42 @@ export function OrderSvgAssets({
         <UploadOrderSvg
           orderId={orderId}
           clientName={clientName}
-          onClose={() => setUploadOpen(false)}
+          onClose={() =>
+            setUploadOpen(
+              false
+            )
+          }
           onCreated={() => {
-            setUploadOpen(false);
-            setMessage("Dodano projekt SVG");
-
-            window.setTimeout(
-              () => setMessage(""),
-              2400
+            setUploadOpen(
+              false
             );
 
-            void load();
+            success(
+              "Dodano nowy projekt SVG"
+            );
+          }}
+        />
+      )}
+
+      {libraryOpen && (
+        <LibraryPicker
+          orderId={orderId}
+          assignedIds={assets.map(
+            (asset) => asset.id
+          )}
+          onClose={() =>
+            setLibraryOpen(
+              false
+            )
+          }
+          onAssigned={() => {
+            setLibraryOpen(
+              false
+            );
+
+            success(
+              "Przypisano projekt z biblioteki"
+            );
           }}
         />
       )}
