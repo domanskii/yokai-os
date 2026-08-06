@@ -78,7 +78,7 @@ const queue = [
 
 const nav = [
   { label: "Dashboard", icon: Gauge, href: "/", active: true },
-  { label: "Produkcja", icon: Zap, href: "/" },
+  { label: "Produkcja", icon: Zap, href: "/production" },
   { label: "Zamówienia", icon: ShoppingBag, href: "/orders" },
   { label: "Biblioteka SVG", icon: FileImage, href: "/" },
   { label: "Kalkulator", icon: CircleDollarSign, href: "/" },

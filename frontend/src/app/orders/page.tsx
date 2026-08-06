@@ -114,7 +114,7 @@ const paymentStatuses: PaymentStatus[] = [
 
 const nav = [
   { label: "Dashboard", icon: Gauge, href: "/" },
-  { label: "Produkcja", icon: Zap, href: "/" },
+  { label: "Produkcja", icon: Zap, href: "/production" },
   { label: "Zamówienia", icon: ShoppingBag, href: "/orders", active: true },
   { label: "Biblioteka SVG", icon: FileImage, href: "/" },
   { label: "Kalkulator", icon: CircleDollarSign, href: "/" },
