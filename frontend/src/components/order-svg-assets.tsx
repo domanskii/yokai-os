@@ -15,6 +15,7 @@ import {
   PackageCheck,
   Plus,
   Search,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -1010,6 +1011,84 @@ export function OrderSvgAssets({
     }
   };
 
+  const removeFromOrder = async (
+    asset: SvgAsset
+  ) => {
+    const confirmed =
+      window.confirm(
+        `Usunąć projekt "${asset.name}" z tego zamówienia?\n\nPlik pozostanie w Bibliotece SVG.`
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
+    const token =
+      localStorage.getItem(
+        "yokai_token"
+      );
+
+    if (!token) {
+      return;
+    }
+
+    setBusyId(
+      asset.id
+    );
+
+    setError("");
+
+    try {
+      const response =
+        await fetch(
+          `/api/svg-assets/${asset.id}/unassign-order`,
+          {
+            method: "POST",
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              order_id: orderId,
+            }),
+          }
+        );
+
+      if (!response.ok) {
+        throw new Error(
+          await readError(
+            response,
+            "Nie udało się usunąć projektu z zamówienia"
+          )
+        );
+      }
+
+      setMessage(
+        "Projekt usunięty z zamówienia"
+      );
+
+      window.setTimeout(
+        () => setMessage(""),
+        2400
+      );
+
+      await load();
+    } catch (
+      removeError
+    ) {
+      setError(
+        removeError
+          instanceof Error
+          ? removeError.message
+          : "Nie udało się usunąć projektu z zamówienia"
+      );
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const download = async (
     asset: SvgAsset
   ) => {
@@ -1213,6 +1292,28 @@ export function OrderSvgAssets({
                         Ustaw produkcyjny
                       </button>
                     )}
+
+                    <button
+                      onClick={() =>
+                        void removeFromOrder(
+                          asset
+                        )
+                      }
+                      disabled={
+                        busyId
+                        === asset.id
+                      }
+                      className="secondary-button compact border-red-400/20 text-red-200 hover:bg-red-400/[.06] disabled:opacity-60"
+                    >
+                      {busyId
+                        === asset.id ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-4" />
+                      )}
+
+                      Usuń z zamówienia
+                    </button>
                   </div>
                 </article>
               )

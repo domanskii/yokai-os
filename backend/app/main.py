@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.17.0")
+app = FastAPI(title="YOKAI OS API", version="0.18.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.17.0",
+        "version": "0.18.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.17",
+                "User-Agent": "YOKAI-OS/0.18",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.17",
+            "User-Agent": "YOKAI-OS/0.18",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.17",
+            "User-Agent": "YOKAI-OS/0.18",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.17",
+            "User-Agent": "YOKAI-OS/0.18",
         },
     )
 
@@ -4842,6 +4842,72 @@ def assign_svg_asset_to_order(
                     order["client_name"],
                     asset_id,
                 ),
+            )
+
+            result = _get_svg_or_404(
+                cur,
+                asset_id,
+            )
+
+        conn.commit()
+
+    return _svg_result(result)
+
+# === YOKAI SVG UNASSIGN V0.18 ===
+
+
+class UnassignSvgAssetFromOrder(BaseModel):
+    order_id: int = Field(gt=0)
+
+
+@app.post(
+    "/svg-assets/{asset_id}/unassign-order"
+)
+def unassign_svg_asset_from_order(
+    asset_id: int,
+    data: UnassignSvgAssetFromOrder,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            asset = _get_svg_or_404(
+                cur,
+                asset_id,
+            )
+
+            if asset["order_id"] is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Projekt nie jest przypisany "
+                        "do żadnego zamówienia"
+                    ),
+                )
+
+            if int(asset["order_id"]) != data.order_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Projekt jest przypisany "
+                        "do innego zamówienia"
+                    ),
+                )
+
+            get_order_or_404(
+                cur,
+                data.order_id,
+            )
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET
+                    order_id = NULL,
+                    is_production_ready = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (asset_id,),
             )
 
             result = _get_svg_or_404(
