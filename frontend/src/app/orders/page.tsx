@@ -845,15 +845,42 @@ export default function OrdersPage() {
 
           <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             {[
-              ["Aktywne", stats?.active ?? 0, ShoppingBag, "text-violet-300"],
-              ["Do cięcia", stats?.cutting ?? 0, Zap, "text-cyan-300"],
-              ["Do wysyłki", stats?.shipping ?? 0, Truck, "text-emerald-300"],
-              ["Nieopłacone", stats?.unpaid ?? 0, Banknote, "text-red-300"],
-              ["Wartość", formatMoney(stats?.total_value ?? 0), CircleDollarSign, "text-amber-300"],
-            ].map(([label, value, Icon, tone]) => (
-              <div key={String(label)} className="surface-card p-4">
+              {
+                label: "Aktywne",
+                value: stats?.active ?? 0,
+                icon: ShoppingBag,
+                tone: "text-violet-300",
+              },
+              {
+                label: "Do cięcia",
+                value: stats?.cutting ?? 0,
+                icon: Zap,
+                tone: "text-cyan-300",
+              },
+              {
+                label: "Do wysyłki",
+                value: stats?.shipping ?? 0,
+                icon: Truck,
+                tone: "text-emerald-300",
+              },
+              {
+                label: "Nieopłacone",
+                value: stats?.unpaid ?? 0,
+                icon: Banknote,
+                tone: "text-red-300",
+              },
+              {
+                label: "Wartość",
+                value: formatMoney(stats?.total_value ?? 0),
+                icon: CircleDollarSign,
+                tone: "text-amber-300",
+              },
+            ].map(({ label, value, icon: Icon, tone }) => (
+              <div key={label} className="surface-card p-4">
                 <Icon className={`size-4 ${tone}`} />
-                <div className="mt-5 text-2xl font-semibold tracking-tight">{value}</div>
+                <div className="mt-5 text-2xl font-semibold tracking-tight">
+                  {value}
+                </div>
                 <div className="mt-1 text-xs text-white/35">{label}</div>
               </div>
             ))}
