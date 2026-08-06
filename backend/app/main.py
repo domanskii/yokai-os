@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.18.0")
+app = FastAPI(title="YOKAI OS API", version="0.19.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.18.0",
+        "version": "0.19.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.18",
+                "User-Agent": "YOKAI-OS/0.19",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.18",
+            "User-Agent": "YOKAI-OS/0.19",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.18",
+            "User-Agent": "YOKAI-OS/0.19",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.18",
+            "User-Agent": "YOKAI-OS/0.19",
         },
     )
 
