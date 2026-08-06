@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.19.0")
+app = FastAPI(title="YOKAI OS API", version="0.20.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.19.0",
+        "version": "0.20.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.19",
+                "User-Agent": "YOKAI-OS/0.20",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.19",
+            "User-Agent": "YOKAI-OS/0.20",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.19",
+            "User-Agent": "YOKAI-OS/0.20",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.19",
+            "User-Agent": "YOKAI-OS/0.20",
         },
     )
 
@@ -4918,3 +4918,192 @@ def unassign_svg_asset_from_order(
         conn.commit()
 
     return _svg_result(result)
+
+# === YOKAI BULK OPERATIONS V0.20 ===
+
+
+class BulkOperationRequest(BaseModel):
+    ids: list[int] = Field(
+        min_length=1,
+        max_length=1000,
+    )
+    action: str = Field(
+        min_length=1,
+        max_length=20,
+    )
+
+
+@app.post("/bulk/{entity}")
+def run_bulk_operation(
+    entity: str,
+    data: BulkOperationRequest,
+    user: dict = Depends(get_current_user),
+):
+    entity_config = {
+        "clients": {
+            "table": "clients",
+            "label": "klientów",
+        },
+        "orders": {
+            "table": "orders",
+            "label": "zamówień",
+        },
+        "materials": {
+            "table": "materials",
+            "label": "materiałów",
+        },
+    }
+
+    if entity not in entity_config:
+        raise HTTPException(
+            status_code=404,
+            detail="Nieobsługiwany typ danych",
+        )
+
+    action = data.action.strip().lower()
+
+    if action not in {
+        "archive",
+        "restore",
+        "delete",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="Nieobsługiwana operacja",
+        )
+
+    ids = sorted(
+        {
+            int(item_id)
+            for item_id in data.ids
+            if int(item_id) > 0
+        }
+    )
+
+    if not ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Nie wybrano żadnych pozycji",
+        )
+
+    table = entity_config[entity]["table"]
+
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                if action in {
+                    "archive",
+                    "restore",
+                }:
+                    archived_value = (
+                        action == "archive"
+                    )
+
+                    cur.execute(
+                        f"""
+                        UPDATE {table}
+                        SET
+                            is_archived = %s,
+                            updated_at = NOW()
+                        WHERE id = ANY(%s)
+                        RETURNING id
+                        """,
+                        (
+                            archived_value,
+                            ids,
+                        ),
+                    )
+
+                    changed_ids = [
+                        row["id"]
+                        for row in cur.fetchall()
+                    ]
+
+                else:
+                    if entity == "clients":
+                        cur.execute(
+                            """
+                            UPDATE orders
+                            SET
+                                client_id = NULL,
+                                updated_at = NOW()
+                            WHERE client_id = ANY(%s)
+                            """,
+                            (ids,),
+                        )
+
+                    elif entity == "orders":
+                        cur.execute(
+                            """
+                            UPDATE calculations
+                            SET
+                                order_id = NULL,
+                                order_price_updated = FALSE,
+                                updated_at = NOW()
+                            WHERE order_id = ANY(%s)
+                            """,
+                            (ids,),
+                        )
+
+                        cur.execute(
+                            """
+                            UPDATE svg_assets
+                            SET
+                                order_id = NULL,
+                                is_production_ready = FALSE,
+                                updated_at = NOW()
+                            WHERE order_id = ANY(%s)
+                            """,
+                            (ids,),
+                        )
+
+                    cur.execute(
+                        f"""
+                        DELETE FROM {table}
+                        WHERE id = ANY(%s)
+                        RETURNING id
+                        """,
+                        (ids,),
+                    )
+
+                    changed_ids = [
+                        row["id"]
+                        for row in cur.fetchall()
+                    ]
+
+            conn.commit()
+
+        except Exception as exc:
+            conn.rollback()
+
+            if action == "delete":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Nie można trwale usunąć części "
+                        "wybranych pozycji, ponieważ są "
+                        "powiązane z innymi danymi. "
+                        "Najpierw je zarchiwizuj."
+                    ),
+                ) from exc
+
+            raise
+
+    action_labels = {
+        "archive": "Zarchiwizowano",
+        "restore": "Przywrócono",
+        "delete": "Usunięto",
+    }
+
+    return {
+        "entity": entity,
+        "action": action,
+        "requested": len(ids),
+        "changed": len(changed_ids),
+        "ids": changed_ids,
+        "message": (
+            f"{action_labels[action]} "
+            f"{len(changed_ids)} "
+            f"{entity_config[entity]['label']}"
+        ),
+    }

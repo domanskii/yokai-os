@@ -1,5 +1,7 @@
 "use client";
 
+import { BulkOperationsButton } from "../../components/bulk-operations-button";
+
 import {
   useEffect,
   useMemo,
@@ -1531,6 +1533,7 @@ export default function ClientsPage() {
           {toast}
         </div>
       )}
-    </main>
+          <BulkOperationsButton entity="clients" />
+</main>
   );
 }

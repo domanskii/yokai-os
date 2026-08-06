@@ -1,5 +1,7 @@
 "use client";
 
+import { BulkOperationsButton } from "../../components/bulk-operations-button";
+
 import { ManualOrderClientSearch } from "../../components/manual-order-client-search";
 
 import { useEffect, useMemo, useState } from "react";
@@ -1226,6 +1228,7 @@ export default function OrdersPage() {
           <span>{toast}</span>
         </div>
       )}
-    </main>
+          <BulkOperationsButton entity="orders" />
+</main>
   );
 }
