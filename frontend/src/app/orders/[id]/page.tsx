@@ -77,6 +77,8 @@ type WooItem = {
   subtotal: string;
   total: string;
   tax: string;
+  image_url: string | null;
+  image_alt: string;
   meta: WooMeta[];
 };
 
@@ -162,6 +164,42 @@ function cleanValue(value: unknown) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+function ProductThumbnail({
+  src,
+  alt,
+}: {
+  src: string | null;
+  alt: string;
+}) {
+  const [failed, setFailed] =
+    useState(false);
+
+  return (
+    <div className="grid size-24 shrink-0 place-items-center overflow-hidden rounded-2xl border border-white/[.07] bg-white/[.025]">
+      {src && !failed ? (
+        <a
+          href={src}
+          target="_blank"
+          rel="noreferrer"
+          className="block size-full"
+          title="Otwórz zdjęcie"
+        >
+          <img
+            src={src}
+            alt={alt}
+            loading="lazy"
+            onError={() => setFailed(true)}
+            className="size-full object-cover transition duration-300 hover:scale-105"
+          />
+        </a>
+      ) : (
+        <Package className="size-8 text-white/15" />
+      )}
+    </div>
+  );
+}
+
 
 function AddressCard({
   title,
@@ -515,28 +553,40 @@ export default function OrderDetailsPage() {
                             key={item.id}
                             className="p-5"
                           >
-                            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-                              <div>
-                                <div className="font-semibold text-white/90">
-                                  {item.name}
-                                </div>
+                            <div className="flex items-start gap-4">
+                              <ProductThumbnail
+                                src={item.image_url}
+                                alt={
+                                  item.image_alt ||
+                                  item.name
+                                }
+                              />
 
-                                <div className="mt-1 text-xs text-white/35">
-                                  {item.quantity} szt.
-                                  {item.sku
-                                    ? ` · SKU: ${item.sku}`
-                                    : ""}
-                                  {item.variation_id
-                                    ? ` · wariant ${item.variation_id}`
-                                    : ""}
-                                </div>
-                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                                  <div className="min-w-0">
+                                    <div className="font-semibold text-white/90">
+                                      {item.name}
+                                    </div>
 
-                              <div className="text-sm font-semibold">
-                                {formatMoney(
-                                  item.total,
-                                  details.currency
-                                )}
+                                    <div className="mt-1 text-xs text-white/35">
+                                      {item.quantity} szt.
+                                      {item.sku
+                                        ? ` · SKU: ${item.sku}`
+                                        : ""}
+                                      {item.variation_id
+                                        ? ` · wariant ${item.variation_id}`
+                                        : ""}
+                                    </div>
+                                  </div>
+
+                                  <div className="shrink-0 text-sm font-semibold">
+                                    {formatMoney(
+                                      item.total,
+                                      details.currency
+                                    )}
+                                  </div>
+                                </div>
                               </div>
                             </div>
 

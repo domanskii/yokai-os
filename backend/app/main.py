@@ -31,7 +31,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.8.0")
+app = FastAPI(title="YOKAI OS API", version="0.9.0")
 
 
 class LoginRequest(BaseModel):
@@ -256,7 +256,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.8.0",
+        "version": "0.9.0",
         "status": "running",
     }
 
@@ -670,7 +670,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.8",
+                "User-Agent": "YOKAI-OS/0.9",
             },
             method="GET",
         )
@@ -1254,7 +1254,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.8",
+            "User-Agent": "YOKAI-OS/0.9",
         },
         method="GET",
     )
@@ -1385,6 +1385,176 @@ def _wc_public_address(address: dict | None) -> dict:
     }
 
 
+
+# === YOKAI PRODUCT IMAGES V0.9 ===
+
+
+def _wc_fetch_optional_resource(
+    resource_path: str,
+) -> dict | None:
+    url, key, secret = _wc_configuration()
+
+    authorization = _wc_base64.b64encode(
+        f"{key}:{secret}".encode("utf-8")
+    ).decode("ascii")
+
+    endpoint = (
+        f"{url}/wp-json/wc/v3/"
+        f"{resource_path.lstrip('/')}"
+    )
+
+    request = _wc_urlrequest.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Basic {authorization}",
+            "Accept": "application/json",
+            "User-Agent": "YOKAI-OS/0.9",
+        },
+        method="GET",
+    )
+
+    try:
+        with _wc_urlrequest.urlopen(
+            request,
+            timeout=20,
+        ) as response:
+            raw = response.read().decode("utf-8")
+
+        data = _wc_json.loads(raw)
+
+        if isinstance(data, dict):
+            return data
+
+    except Exception:
+        # Brak zdjęcia nie może blokować całej karty zamówienia.
+        return None
+
+    return None
+
+
+def _wc_extract_image(
+    payload: dict | None,
+    fallback_alt: str,
+) -> dict | None:
+    if not payload:
+        return None
+
+    image = payload.get("image")
+
+    if not isinstance(image, dict):
+        images = payload.get("images")
+
+        if isinstance(images, list) and images:
+            first_image = images[0]
+
+            if isinstance(first_image, dict):
+                image = first_image
+
+    if not isinstance(image, dict):
+        return None
+
+    src = str(image.get("src") or "").strip()
+
+    if not src:
+        return None
+
+    alt = str(
+        image.get("alt")
+        or image.get("name")
+        or fallback_alt
+    ).strip()
+
+    return {
+        "url": src,
+        "alt": alt or fallback_alt,
+    }
+
+
+def _wc_item_image(
+    item: dict,
+    cache: dict[tuple[int, int], dict],
+) -> dict:
+    item_name = str(
+        item.get("name") or "Produkt"
+    ).strip()
+
+    direct_image = item.get("image")
+
+    if isinstance(direct_image, dict):
+        direct_src = str(
+            direct_image.get("src") or ""
+        ).strip()
+
+        if direct_src:
+            return {
+                "url": direct_src,
+                "alt": str(
+                    direct_image.get("alt")
+                    or direct_image.get("name")
+                    or item_name
+                ).strip(),
+            }
+
+    try:
+        product_id = int(
+            item.get("product_id") or 0
+        )
+    except (TypeError, ValueError):
+        product_id = 0
+
+    try:
+        variation_id = int(
+            item.get("variation_id") or 0
+        )
+    except (TypeError, ValueError):
+        variation_id = 0
+
+    cache_key = (
+        product_id,
+        variation_id,
+    )
+
+    if cache_key in cache:
+        return cache[cache_key]
+
+    result = {
+        "url": None,
+        "alt": item_name,
+    }
+
+    if product_id and variation_id:
+        variation = _wc_fetch_optional_resource(
+            f"products/{product_id}/variations/"
+            f"{variation_id}?image_size=medium"
+        )
+
+        variation_image = _wc_extract_image(
+            variation,
+            item_name,
+        )
+
+        if variation_image:
+            cache[cache_key] = variation_image
+            return variation_image
+
+    if product_id:
+        product = _wc_fetch_optional_resource(
+            f"products/{product_id}?image_size=medium"
+        )
+
+        product_image = _wc_extract_image(
+            product,
+            item_name,
+        )
+
+        if product_image:
+            cache[cache_key] = product_image
+            return product_image
+
+    cache[cache_key] = result
+    return result
+
+
 @app.get("/orders/{order_id}/woocommerce-details")
 def get_woocommerce_order_details(
     order_id: int,
@@ -1434,8 +1604,14 @@ def get_woocommerce_order_details(
     )
 
     items = []
+    image_cache: dict[tuple[int, int], dict] = {}
 
     for item in order.get("line_items") or []:
+        item_image = _wc_item_image(
+            item,
+            image_cache,
+        )
+
         items.append(
             {
                 "id": item.get("id"),
@@ -1462,6 +1638,9 @@ def get_woocommerce_order_details(
                 "tax": str(
                     item.get("total_tax") or "0"
                 ),
+                "image_url": item_image.get("url"),
+                "image_alt": item_image.get("alt")
+                or str(item.get("name") or "Produkt"),
                 "meta": _wc_public_meta(
                     item.get("meta_data")
                 ),
