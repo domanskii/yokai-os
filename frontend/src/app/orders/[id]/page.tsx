@@ -1,5 +1,7 @@
 "use client";
 
+import { OrderSvgAssets } from "../../../components/order-svg-assets";
+
 import {
   useEffect,
   useMemo,
@@ -534,6 +536,11 @@ export default function OrderDetailsPage() {
                 </div>
               </div>
             </section>
+
+            <OrderSvgAssets
+              orderId={order.id}
+              clientName={order.client_name}
+            />
 
             {details ? (
               <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_.85fr]">

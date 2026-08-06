@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.14.0")
+app = FastAPI(title="YOKAI OS API", version="0.15.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.14.0",
+        "version": "0.15.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.14",
+                "User-Agent": "YOKAI-OS/0.15",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.14",
+            "User-Agent": "YOKAI-OS/0.15",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.14",
+            "User-Agent": "YOKAI-OS/0.15",
         },
         method="GET",
     )
@@ -3589,3 +3589,183 @@ def restore_svg_asset(
         conn.commit()
 
     return _svg_result(asset)
+
+# === YOKAI SVG ORDER LINK V0.15 ===
+
+
+@app.on_event("startup")
+def startup_svg_order_link():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE svg_assets
+                ADD COLUMN IF NOT EXISTS is_production_ready
+                BOOLEAN NOT NULL DEFAULT FALSE
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                svg_assets_production_ready_index
+                ON svg_assets (
+                    order_id,
+                    is_production_ready
+                )
+                WHERE is_archived = FALSE
+                """
+            )
+
+        conn.commit()
+
+
+@app.get("/orders/{order_id}/svg-assets")
+def get_order_svg_assets(
+    order_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            get_order_or_404(cur, order_id)
+
+            cur.execute(
+                """
+                SELECT
+                    a.*,
+                    o.order_number,
+                    o.name AS order_name
+                FROM svg_assets a
+                LEFT JOIN orders o
+                    ON o.id = a.order_id
+                WHERE a.order_id = %s
+                  AND a.is_archived = FALSE
+                ORDER BY
+                    a.is_production_ready DESC,
+                    a.created_at DESC
+                """,
+                (order_id,),
+            )
+
+            rows = cur.fetchall()
+
+    return [_svg_result(row) for row in rows]
+
+
+@app.get("/orders/{order_id}/svg-summary")
+def get_order_svg_summary(
+    order_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            get_order_or_404(cur, order_id)
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (
+                        WHERE is_production_ready = TRUE
+                    ) AS ready_count,
+                    MAX(name) FILTER (
+                        WHERE is_production_ready = TRUE
+                    ) AS ready_name,
+                    MAX(asset_number) FILTER (
+                        WHERE is_production_ready = TRUE
+                    ) AS ready_asset_number
+                FROM svg_assets
+                WHERE order_id = %s
+                  AND is_archived = FALSE
+                """,
+                (order_id,),
+            )
+
+            row = cur.fetchone()
+
+    return {
+        "order_id": order_id,
+        "total": int(row["total"] or 0),
+        "ready_count": int(row["ready_count"] or 0),
+        "has_ready": bool(row["ready_count"]),
+        "ready_name": row["ready_name"],
+        "ready_asset_number": row["ready_asset_number"],
+    }
+
+
+@app.post("/svg-assets/{asset_id}/set-production-ready")
+def set_svg_production_ready(
+    asset_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            asset = _get_svg_or_404(cur, asset_id)
+
+            if asset["is_archived"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nie można ustawić zarchiwizowanego projektu",
+                )
+
+            if asset["order_id"] is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Najpierw przypisz projekt do zamówienia",
+                )
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET
+                    is_production_ready = FALSE,
+                    updated_at = NOW()
+                WHERE order_id = %s
+                  AND is_archived = FALSE
+                """,
+                (asset["order_id"],),
+            )
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET
+                    is_production_ready = TRUE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (asset_id,),
+            )
+
+            result = _get_svg_or_404(cur, asset_id)
+
+        conn.commit()
+
+    return _svg_result(result)
+
+
+@app.post("/svg-assets/{asset_id}/clear-production-ready")
+def clear_svg_production_ready(
+    asset_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_svg_or_404(cur, asset_id)
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET
+                    is_production_ready = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (asset_id,),
+            )
+
+            result = _get_svg_or_404(cur, asset_id)
+
+        conn.commit()
+
+    return _svg_result(result)

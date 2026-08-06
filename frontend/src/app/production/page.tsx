@@ -1,5 +1,7 @@
 "use client";
 
+import { ProductionSvgBadge } from "../../components/production-svg-badge";
+
 import {
   useEffect,
   useMemo,
@@ -288,6 +290,8 @@ function OrderCard({
 
       <div className="mt-4 flex flex-wrap gap-1.5">
         <PaymentBadge status={order.payment_status} />
+
+        <ProductionSvgBadge orderId={order.id} />
 
         {order.source === "WooCommerce" && (
           <span className="rounded-full border border-violet-400/20 bg-violet-400/[.07] px-2 py-0.5 text-[10px] text-violet-200">
