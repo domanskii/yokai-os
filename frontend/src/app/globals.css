@@ -262,3 +262,13 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+
+@keyframes drawer {
+  from { transform: translateX(32px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.animate-drawer {
+  animation: drawer 240ms cubic-bezier(.2,.8,.2,1) both;
+}

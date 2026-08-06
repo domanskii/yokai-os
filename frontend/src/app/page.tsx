@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Bell,
   Boxes,
@@ -76,15 +77,15 @@ const queue = [
 ];
 
 const nav = [
-  { label: "Dashboard", icon: Gauge, active: true },
-  { label: "Produkcja", icon: Zap },
-  { label: "Zamówienia", icon: ShoppingBag },
-  { label: "Biblioteka SVG", icon: FileImage },
-  { label: "Kalkulator", icon: CircleDollarSign },
-  { label: "Materiały", icon: Boxes },
-  { label: "Klienci", icon: Users },
-  { label: "AI Studio", icon: WandSparkles },
-  { label: "Ustawienia", icon: Settings },
+  { label: "Dashboard", icon: Gauge, href: "/", active: true },
+  { label: "Produkcja", icon: Zap, href: "/" },
+  { label: "Zamówienia", icon: ShoppingBag, href: "/orders" },
+  { label: "Biblioteka SVG", icon: FileImage, href: "/" },
+  { label: "Kalkulator", icon: CircleDollarSign, href: "/" },
+  { label: "Materiały", icon: Boxes, href: "/" },
+  { label: "Klienci", icon: Users, href: "/" },
+  { label: "AI Studio", icon: WandSparkles, href: "/" },
+  { label: "Ustawienia", icon: Settings, href: "/" },
 ];
 
 function apiOrderToOrder(order: ApiOrder): Order {
@@ -362,6 +363,7 @@ function OrderModal({
 }
 
 export default function Home() {
+  const router = useRouter();
   const [token, setToken] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [authReady, setAuthReady] = useState(false);
@@ -494,8 +496,8 @@ export default function Home() {
         </button>
 
         <nav className="mt-6 space-y-1">
-          {nav.map(({ label, icon: Icon, active }) => (
-            <button key={label} className={`nav-item ${active ? "nav-item-active" : ""}`}>
+          {nav.map(({ label, icon: Icon, href, active }) => (
+            <button onClick={() => router.push(href)} key={label} className={`nav-item ${active ? "nav-item-active" : ""}`}>
               <Icon className="size-[18px]" />
               <span>{label}</span>
               {active && <span className="ml-auto size-1.5 rounded-full bg-violet-400 shadow-[0_0_12px_rgba(167,139,250,.9)]" />}
@@ -532,8 +534,8 @@ export default function Home() {
               <Plus className="size-4" /> Nowe zamówienie
             </button>
             <nav className="space-y-1">
-              {nav.map(({ label, icon: Icon, active }) => (
-                <button key={label} className={`nav-item ${active ? "nav-item-active" : ""}`}>
+              {nav.map(({ label, icon: Icon, href, active }) => (
+                <button onClick={() => router.push(href)} key={label} className={`nav-item ${active ? "nav-item-active" : ""}`}>
                   <Icon className="size-[18px]" /> {label}
                 </button>
               ))}
@@ -657,7 +659,7 @@ export default function Home() {
             <div className="surface-card overflow-hidden">
               <div className="flex items-center justify-between border-b border-white/[.055] px-5 py-4 sm:px-6">
                 <div><h2 className="font-semibold tracking-tight">Ostatnie zamówienia</h2><p className="mt-1 text-xs text-white/35">{demoMode ? "Dane demonstracyjne" : "Sklep i zlecenia ręczne w jednym miejscu"}</p></div>
-                <button className="secondary-button compact">Wszystkie</button>
+                <button onClick={() => router.push("/orders")} className="secondary-button compact">Wszystkie</button>
               </div>
               <div className="divide-y divide-white/[.045]">
                 {orders.slice(0, 5).map((order) => (
