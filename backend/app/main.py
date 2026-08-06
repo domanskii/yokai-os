@@ -2852,11 +2852,10 @@ def restore_calculation_v012(
 
     return _calculation_result(result)
 
-
 # === YOKAI ORDER FROM CALCULATOR V0.13 ===
 
 
-def _calculator_dimension(value: object) -> str:
+def _format_calculation_dimension(value: object) -> str:
     number = Decimal(str(value or 0))
 
     if number == number.to_integral():
@@ -2869,44 +2868,55 @@ def _calculator_dimension(value: object) -> str:
     "/calculations/actions/create-order",
     status_code=status.HTTP_201_CREATED,
 )
-def create_order_from_calculator_v013(
+def create_order_from_calculator(
     data: CalculationCreate,
     user: dict = Depends(get_current_user),
 ):
     if data.order_id is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Kalkulacja jest już przypisana do zamówienia. "
-                "Otwórz istniejące zamówienie."
-            ),
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                order = get_order_or_404(
+                    cur,
+                    data.order_id,
+                )
+
+        return {
+            "order": order,
+            "calculation": None,
+            "created": False,
+        }
+
+    calculation_data = data.model_copy(
+        update={
+            "order_id": None,
+            "update_order_price": False,
+        }
+    )
+
+    calculation = create_calculation(
+        calculation_data,
+        user,
+    )
+
+    size = (
+        f"{_format_calculation_dimension(data.width_cm)}"
+        f" × "
+        f"{_format_calculation_dimension(data.height_cm)} cm"
+    )
+
+    calculation_note = (
+        f"Utworzono z kalkulacji "
+        f"{calculation['calculation_number']}."
+    )
+
+    if data.notes and data.notes.strip():
+        calculation_note += (
+            "\n\nUwagi z kalkulacji:\n"
+            + data.notes.strip()
         )
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            _ensure_calculator_v012_schema(cur)
-
-            totals = _calculate_order_cost(cur, data)
-
-            if data.deduct_stock:
-                for material_id, used_length in totals["deductions"].items():
-                    cur.execute(
-                        """
-                        UPDATE materials
-                        SET
-                            stock_length_m = stock_length_m - %s,
-                            updated_at = NOW()
-                        WHERE id = %s
-                        """,
-                        (used_length, material_id),
-                    )
-
-            size = (
-                f"{_calculator_dimension(data.width_cm)}"
-                " × "
-                f"{_calculator_dimension(data.height_cm)} cm"
-            )
-
             cur.execute(
                 """
                 INSERT INTO orders (
@@ -2923,26 +2933,19 @@ def create_order_from_calculator_v013(
                     status
                 )
                 VALUES (
-                    'Do uzupełnienia',
-                    %s,
-                    'Kalkulator',
-                    %s,
-                    %s,
-                    %s,
-                    0,
-                    'Nieopłacone',
-                    NULL,
-                    %s,
-                    'Nowe'
+                    %s, %s, %s, %s, %s, %s,
+                    0, 'Nieopłacone', NULL, %s, 'Nowe'
                 )
                 RETURNING id
                 """,
                 (
+                    "Do uzupełnienia",
                     data.name.strip(),
+                    "Kalkulator",
                     size,
                     data.quantity,
-                    totals["suggested_price"],
-                    data.notes.strip() if data.notes else None,
+                    calculation["suggested_price"],
+                    calculation_note,
                 ),
             )
 
@@ -2957,123 +2960,41 @@ def create_order_from_calculator_v013(
                     updated_at = NOW()
                 WHERE id = %s
                 """,
-                (order_number, order_id),
-            )
-
-            cur.execute(
-                """
-                INSERT INTO calculations (
-                    order_id,
-                    name,
-                    width_cm,
-                    height_cm,
-                    quantity,
-                    waste_percent,
-                    labor_minutes,
-                    hourly_rate,
-                    margin_percent,
-                    base_area_m2,
-                    material_cost,
-                    labor_cost,
-                    total_cost,
-                    suggested_price,
-                    profit,
-                    material_breakdown,
-                    stock_deducted,
-                    order_price_updated,
-                    notes,
-                    is_deleted,
-                    deleted_at,
-                    updated_at
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
-                    %s, FALSE, NULL, NOW()
-                )
-                RETURNING id
-                """,
                 (
+                    order_number,
                     order_id,
-                    data.name.strip(),
-                    data.width_cm,
-                    data.height_cm,
-                    data.quantity,
-                    data.waste_percent,
-                    data.labor_minutes,
-                    data.hourly_rate,
-                    data.margin_percent,
-                    totals["base_area"],
-                    totals["material_cost"],
-                    totals["labor_cost"],
-                    totals["total_cost"],
-                    totals["suggested_price"],
-                    totals["profit"],
-                    _CalcJsonb(totals["breakdown"]),
-                    data.deduct_stock,
-                    data.notes.strip() if data.notes else None,
                 ),
             )
-
-            calculation_id = cur.fetchone()["id"]
-            calculation_number = f"YK-C-{calculation_id:05d}"
 
             cur.execute(
                 """
                 UPDATE calculations
-                SET calculation_number = %s
-                WHERE id = %s
-                """,
-                (calculation_number, calculation_id),
-            )
-
-            note_lines = [
-                f"Utworzono z kalkulacji {calculation_number}."
-            ]
-
-            if data.notes and data.notes.strip():
-                note_lines.extend(
-                    [
-                        "",
-                        "Uwagi z kalkulacji:",
-                        data.notes.strip(),
-                    ]
-                )
-
-            cur.execute(
-                """
-                UPDATE orders
                 SET
-                    notes = %s,
+                    order_id = %s,
+                    order_price_updated = TRUE,
                     updated_at = NOW()
                 WHERE id = %s
                 """,
-                ("
-".join(note_lines), order_id),
+                (
+                    order_id,
+                    calculation["id"],
+                ),
             )
 
-            order = get_order_or_404(cur, order_id)
-
-            cur.execute(
-                """
-                SELECT
-                    c.*,
-                    o.order_number,
-                    o.client_name
-                FROM calculations c
-                LEFT JOIN orders o
-                    ON o.id = c.order_id
-                WHERE c.id = %s
-                """,
-                (calculation_id,),
+            order = get_order_or_404(
+                cur,
+                order_id,
             )
-
-            calculation = cur.fetchone()
 
         conn.commit()
 
     return {
-        "created": True,
         "order": order,
-        "calculation": _calculation_result(calculation),
+        "calculation": {
+            **calculation,
+            "order_id": order_id,
+            "order_number": order_number,
+            "order_price_updated": True,
+        },
+        "created": True,
     }
