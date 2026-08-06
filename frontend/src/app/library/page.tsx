@@ -97,7 +97,7 @@ const nav: NavItem[] = [
     href: "/calculator",
   },
   { label: "Materiały", icon: Boxes, href: "/materials" },
-  { label: "Klienci", icon: Users, href: "/" },
+  { label: "Klienci", icon: Users, href: "/clients" },
   { label: "AI Studio", icon: WandSparkles, href: "/" },
   { label: "Ustawienia", icon: Settings, href: "/" },
 ];

@@ -159,7 +159,7 @@ const nav: NavItem[] = [
   {
     label: "Klienci",
     icon: Users,
-    href: "/",
+    href: "/clients",
   },
   {
     label: "AI Studio",

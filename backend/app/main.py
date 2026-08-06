@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.15.0")
+app = FastAPI(title="YOKAI OS API", version="0.16.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.15.0",
+        "version": "0.16.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.15",
+                "User-Agent": "YOKAI-OS/0.16",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.15",
+            "User-Agent": "YOKAI-OS/0.16",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.15",
+            "User-Agent": "YOKAI-OS/0.16",
         },
         method="GET",
     )
@@ -3769,3 +3769,948 @@ def clear_svg_production_ready(
         conn.commit()
 
     return _svg_result(result)
+
+# === YOKAI CLIENTS AND NIP LOOKUP V0.16 ===
+
+import json as _client_json
+import re as _client_re
+import urllib.error as _client_urlerror
+import urllib.parse as _client_urlparse
+import urllib.request as _client_urlrequest
+from datetime import date as _client_date
+
+from psycopg.types.json import Jsonb as _ClientJsonb
+
+
+class ClientCreate(BaseModel):
+    client_type: str = Field(default="person", max_length=20)
+    first_name: str | None = Field(default=None, max_length=120)
+    last_name: str | None = Field(default=None, max_length=120)
+    company_name: str | None = Field(default=None, max_length=250)
+    nip: str | None = Field(default=None, max_length=20)
+    regon: str | None = Field(default=None, max_length=30)
+    krs: str | None = Field(default=None, max_length=30)
+    vat_status: str | None = Field(default=None, max_length=80)
+    email: str | None = Field(default=None, max_length=250)
+    phone: str | None = Field(default=None, max_length=80)
+    address: str | None = Field(default=None, max_length=500)
+    postal_code: str | None = Field(default=None, max_length=20)
+    city: str | None = Field(default=None, max_length=120)
+    country: str | None = Field(default="Polska", max_length=120)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+class ClientUpdate(BaseModel):
+    client_type: str | None = Field(default=None, max_length=20)
+    first_name: str | None = Field(default=None, max_length=120)
+    last_name: str | None = Field(default=None, max_length=120)
+    company_name: str | None = Field(default=None, max_length=250)
+    nip: str | None = Field(default=None, max_length=20)
+    regon: str | None = Field(default=None, max_length=30)
+    krs: str | None = Field(default=None, max_length=30)
+    vat_status: str | None = Field(default=None, max_length=80)
+    email: str | None = Field(default=None, max_length=250)
+    phone: str | None = Field(default=None, max_length=80)
+    address: str | None = Field(default=None, max_length=500)
+    postal_code: str | None = Field(default=None, max_length=20)
+    city: str | None = Field(default=None, max_length=120)
+    country: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+class AssignClientToOrder(BaseModel):
+    client_id: int = Field(gt=0)
+
+
+def _clean_client_text(value: object) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _clean_nip(value: object) -> str | None:
+    cleaned = _client_re.sub(r"\D", "", str(value or ""))
+
+    if not cleaned:
+        return None
+
+    return cleaned
+
+
+def _valid_nip(nip: str) -> bool:
+    if not _client_re.fullmatch(r"\d{10}", nip):
+        return False
+
+    weights = [6, 5, 7, 2, 3, 4, 5, 6, 7]
+    checksum = sum(
+        int(nip[index]) * weights[index]
+        for index in range(9)
+    ) % 11
+
+    return checksum != 10 and checksum == int(nip[9])
+
+
+def _client_display_name(values: dict) -> str:
+    client_type = (
+        values.get("client_type")
+        or "person"
+    ).strip().lower()
+
+    if client_type == "company":
+        company_name = _clean_client_text(
+            values.get("company_name")
+        )
+
+        if not company_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Podaj nazwę firmy",
+            )
+
+        return company_name
+
+    first_name = _clean_client_text(
+        values.get("first_name")
+    )
+    last_name = _clean_client_text(
+        values.get("last_name")
+    )
+    display_name = " ".join(
+        value
+        for value in [first_name, last_name]
+        if value
+    ).strip()
+
+    if not display_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Podaj imię lub nazwisko klienta",
+        )
+
+    return display_name
+
+
+def _client_result(row: dict) -> dict:
+    result = dict(row)
+    result["order_count"] = int(
+        result.get("order_count") or 0
+    )
+    result["order_value"] = float(
+        result.get("order_value") or 0
+    )
+    return result
+
+
+def _get_client_or_404(cur, client_id: int) -> dict:
+    cur.execute(
+        """
+        SELECT
+            c.*,
+            COUNT(o.id) AS order_count,
+            COALESCE(SUM(o.price), 0) AS order_value
+        FROM clients c
+        LEFT JOIN orders o
+            ON o.client_id = c.id
+        WHERE c.id = %s
+        GROUP BY c.id
+        """,
+        (client_id,),
+    )
+
+    client = cur.fetchone()
+
+    if client is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono klienta",
+        )
+
+    return client
+
+
+@app.on_event("startup")
+def startup_clients_module():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clients (
+                    id BIGSERIAL PRIMARY KEY,
+                    client_number TEXT UNIQUE,
+                    client_type TEXT NOT NULL DEFAULT 'person',
+                    first_name TEXT,
+                    last_name TEXT,
+                    company_name TEXT,
+                    display_name TEXT NOT NULL,
+                    nip TEXT UNIQUE,
+                    regon TEXT,
+                    krs TEXT,
+                    vat_status TEXT,
+                    email TEXT,
+                    phone TEXT,
+                    address TEXT,
+                    postal_code TEXT,
+                    city TEXT,
+                    country TEXT NOT NULL DEFAULT 'Polska',
+                    notes TEXT,
+                    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE orders
+                ADD COLUMN IF NOT EXISTS client_id
+                BIGINT REFERENCES clients(id)
+                ON DELETE SET NULL
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS clients_active_index
+                ON clients (
+                    is_archived,
+                    display_name
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS orders_client_index
+                ON orders (
+                    client_id,
+                    created_at DESC
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_lookup_cache (
+                    nip TEXT NOT NULL,
+                    lookup_date DATE NOT NULL,
+                    payload JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (nip, lookup_date)
+                )
+                """
+            )
+
+        conn.commit()
+
+
+@app.get("/company-lookup/nip/{nip}")
+def lookup_company_by_nip(
+    nip: str,
+    user: dict = Depends(get_current_user),
+):
+    cleaned_nip = _clean_nip(nip)
+
+    if cleaned_nip is None or not _valid_nip(cleaned_nip):
+        raise HTTPException(
+            status_code=400,
+            detail="Podany NIP jest nieprawidłowy",
+        )
+
+    lookup_date = _client_date.today().isoformat()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT payload
+                FROM company_lookup_cache
+                WHERE nip = %s
+                  AND lookup_date = %s
+                """,
+                (cleaned_nip, lookup_date),
+            )
+
+            cached = cur.fetchone()
+
+    if cached is not None:
+        payload = dict(cached["payload"])
+        payload["cached"] = True
+        return payload
+
+    api_url = (
+        "https://wl-api.mf.gov.pl/api/search/nip/"
+        + _client_urlparse.quote(cleaned_nip)
+        + "?date="
+        + _client_urlparse.quote(lookup_date)
+    )
+
+    request = _client_urlrequest.Request(
+        api_url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "YOKAI-OS/0.16",
+        },
+    )
+
+    try:
+        with _client_urlrequest.urlopen(
+            request,
+            timeout=12,
+        ) as response:
+            raw_data = response.read().decode("utf-8")
+            api_data = _client_json.loads(raw_data)
+    except _client_urlerror.HTTPError as exc:
+        try:
+            error_data = _client_json.loads(
+                exc.read().decode("utf-8")
+            )
+            error_message = (
+                error_data.get("message")
+                or error_data.get("code")
+            )
+        except Exception:
+            error_message = None
+
+        raise HTTPException(
+            status_code=404 if exc.code == 404 else 502,
+            detail=(
+                error_message
+                or "Nie znaleziono firmy w rejestrze Ministerstwa Finansów"
+            ),
+        ) from exc
+    except (
+        _client_urlerror.URLError,
+        TimeoutError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Rejestr Ministerstwa Finansów "
+                "jest chwilowo niedostępny"
+            ),
+        ) from exc
+
+    result = api_data.get("result") or {}
+    subject = result.get("subject")
+
+    if not subject:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono firmy dla podanego NIP-u",
+        )
+
+    payload = {
+        "source": "Ministerstwo Finansów – Wykaz podatników VAT",
+        "lookup_date": lookup_date,
+        "request_id": result.get("requestId"),
+        "cached": False,
+        "company_name": subject.get("name"),
+        "nip": subject.get("nip") or cleaned_nip,
+        "regon": subject.get("regon"),
+        "krs": subject.get("krs"),
+        "vat_status": subject.get("statusVat"),
+        "working_address": subject.get("workingAddress"),
+        "residence_address": subject.get("residenceAddress"),
+        "address": (
+            subject.get("workingAddress")
+            or subject.get("residenceAddress")
+        ),
+    }
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO company_lookup_cache (
+                    nip,
+                    lookup_date,
+                    payload
+                )
+                VALUES (%s, %s, %s)
+                ON CONFLICT (nip, lookup_date)
+                DO UPDATE SET payload = EXCLUDED.payload
+                """,
+                (
+                    cleaned_nip,
+                    lookup_date,
+                    _ClientJsonb(payload),
+                ),
+            )
+
+        conn.commit()
+
+    return payload
+
+
+@app.get("/clients/stats")
+def client_stats(
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                    ) AS active,
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                        AND client_type = 'company'
+                    ) AS companies,
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                        AND client_type = 'person'
+                    ) AS people
+                FROM clients
+                """
+            )
+            client_row = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS linked_orders,
+                    COALESCE(SUM(price), 0) AS linked_value
+                FROM orders
+                WHERE client_id IS NOT NULL
+                """
+            )
+            order_row = cur.fetchone()
+
+    return {
+        "active": int(client_row["active"] or 0),
+        "companies": int(client_row["companies"] or 0),
+        "people": int(client_row["people"] or 0),
+        "linked_orders": int(order_row["linked_orders"] or 0),
+        "linked_value": float(order_row["linked_value"] or 0),
+    }
+
+
+@app.get("/clients")
+def list_clients(
+    search: str | None = Query(default=None, max_length=200),
+    archived: bool = False,
+    limit: int = Query(default=500, ge=1, le=1000),
+    user: dict = Depends(get_current_user),
+):
+    conditions = ["c.is_archived = %s"]
+    params: list[object] = [archived]
+
+    if search and search.strip():
+        phrase = f"%{search.strip()}%"
+
+        conditions.append(
+            """
+            (
+                c.client_number ILIKE %s
+                OR c.display_name ILIKE %s
+                OR COALESCE(c.nip, '') ILIKE %s
+                OR COALESCE(c.regon, '') ILIKE %s
+                OR COALESCE(c.email, '') ILIKE %s
+                OR COALESCE(c.phone, '') ILIKE %s
+                OR COALESCE(c.city, '') ILIKE %s
+                OR COALESCE(c.address, '') ILIKE %s
+            )
+            """
+        )
+        params.extend([phrase] * 8)
+
+    params.append(limit)
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    c.*,
+                    COUNT(o.id) AS order_count,
+                    COALESCE(SUM(o.price), 0) AS order_value
+                FROM clients c
+                LEFT JOIN orders o
+                    ON o.client_id = c.id
+                WHERE {" AND ".join(conditions)}
+                GROUP BY c.id
+                ORDER BY c.updated_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+    return [_client_result(row) for row in rows]
+
+
+@app.post("/clients", status_code=status.HTTP_201_CREATED)
+def create_client(
+    data: ClientCreate,
+    user: dict = Depends(get_current_user),
+):
+    values = data.model_dump()
+    client_type = (
+        _clean_client_text(values.get("client_type"))
+        or "person"
+    ).lower()
+
+    if client_type not in {"person", "company"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Nieprawidłowy typ klienta",
+        )
+
+    values["client_type"] = client_type
+    values["nip"] = _clean_nip(values.get("nip"))
+
+    if values["nip"] and not _valid_nip(values["nip"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Podany NIP jest nieprawidłowy",
+        )
+
+    display_name = _client_display_name(values)
+
+    cleaned_values = {
+        key: _clean_client_text(value)
+        for key, value in values.items()
+    }
+
+    cleaned_values["client_type"] = client_type
+    cleaned_values["nip"] = values["nip"]
+    cleaned_values["country"] = (
+        cleaned_values.get("country")
+        or "Polska"
+    )
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO clients (
+                        client_type,
+                        first_name,
+                        last_name,
+                        company_name,
+                        display_name,
+                        nip,
+                        regon,
+                        krs,
+                        vat_status,
+                        email,
+                        phone,
+                        address,
+                        postal_code,
+                        city,
+                        country,
+                        notes
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        client_type,
+                        cleaned_values.get("first_name"),
+                        cleaned_values.get("last_name"),
+                        cleaned_values.get("company_name"),
+                        display_name,
+                        cleaned_values.get("nip"),
+                        cleaned_values.get("regon"),
+                        cleaned_values.get("krs"),
+                        cleaned_values.get("vat_status"),
+                        cleaned_values.get("email"),
+                        cleaned_values.get("phone"),
+                        cleaned_values.get("address"),
+                        cleaned_values.get("postal_code"),
+                        cleaned_values.get("city"),
+                        cleaned_values.get("country"),
+                        cleaned_values.get("notes"),
+                    ),
+                )
+
+                client_id = cur.fetchone()["id"]
+                client_number = f"KL-{client_id:05d}"
+
+                cur.execute(
+                    """
+                    UPDATE clients
+                    SET client_number = %s
+                    WHERE id = %s
+                    """,
+                    (client_number, client_id),
+                )
+
+                client = _get_client_or_404(cur, client_id)
+
+            conn.commit()
+
+    except Exception as exc:
+        if "clients_nip_key" in str(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Klient z tym NIP-em już istnieje",
+            ) from exc
+        raise
+
+    return _client_result(client)
+
+
+@app.get("/clients/{client_id}")
+def get_client(
+    client_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            client = _get_client_or_404(cur, client_id)
+
+    return _client_result(client)
+
+
+@app.patch("/clients/{client_id}")
+def update_client(
+    client_id: int,
+    data: ClientUpdate,
+    user: dict = Depends(get_current_user),
+):
+    updates = data.model_dump(exclude_unset=True)
+
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="Brak danych do zapisania",
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            current = _get_client_or_404(cur, client_id)
+
+    merged = {
+        key: current.get(key)
+        for key in [
+            "client_type",
+            "first_name",
+            "last_name",
+            "company_name",
+            "nip",
+            "regon",
+            "krs",
+            "vat_status",
+            "email",
+            "phone",
+            "address",
+            "postal_code",
+            "city",
+            "country",
+            "notes",
+        ]
+    }
+    merged.update(updates)
+
+    client_type = (
+        _clean_client_text(merged.get("client_type"))
+        or "person"
+    ).lower()
+
+    if client_type not in {"person", "company"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Nieprawidłowy typ klienta",
+        )
+
+    merged["client_type"] = client_type
+    merged["nip"] = _clean_nip(merged.get("nip"))
+
+    if merged["nip"] and not _valid_nip(merged["nip"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Podany NIP jest nieprawidłowy",
+        )
+
+    display_name = _client_display_name(merged)
+
+    allowed = {
+        "client_type",
+        "first_name",
+        "last_name",
+        "company_name",
+        "nip",
+        "regon",
+        "krs",
+        "vat_status",
+        "email",
+        "phone",
+        "address",
+        "postal_code",
+        "city",
+        "country",
+        "notes",
+    }
+
+    assignments: list[str] = []
+    params: list[object] = []
+
+    for field in allowed:
+        if field not in updates and field not in {
+            "client_type",
+            "nip",
+        }:
+            continue
+
+        value = merged.get(field)
+
+        if field == "nip":
+            value = _clean_nip(value)
+        elif isinstance(value, str):
+            value = value.strip() or None
+
+        assignments.append(f"{field} = %s")
+        params.append(value)
+
+    assignments.extend(
+        [
+            "display_name = %s",
+            "updated_at = NOW()",
+        ]
+    )
+    params.extend([display_name, client_id])
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE clients
+                    SET {", ".join(assignments)}
+                    WHERE id = %s
+                    """,
+                    params,
+                )
+
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        client_name = %s,
+                        updated_at = NOW()
+                    WHERE client_id = %s
+                    """,
+                    (display_name, client_id),
+                )
+
+                client = _get_client_or_404(cur, client_id)
+
+            conn.commit()
+
+    except Exception as exc:
+        if "clients_nip_key" in str(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Klient z tym NIP-em już istnieje",
+            ) from exc
+        raise
+
+    return _client_result(client)
+
+
+@app.get("/clients/{client_id}/orders")
+def get_client_orders(
+    client_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            client = _get_client_or_404(cur, client_id)
+
+            cur.execute(
+                """
+                SELECT *
+                FROM orders
+                WHERE client_id = %s
+                   OR (
+                        client_id IS NULL
+                        AND client_name = %s
+                   )
+                ORDER BY created_at DESC
+                LIMIT 300
+                """,
+                (
+                    client_id,
+                    client["display_name"],
+                ),
+            )
+
+            rows = cur.fetchall()
+
+    return rows
+
+
+@app.post("/clients/{client_id}/archive")
+def archive_client(
+    client_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_client_or_404(cur, client_id)
+
+            cur.execute(
+                """
+                UPDATE clients
+                SET
+                    is_archived = TRUE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (client_id,),
+            )
+
+            client = _get_client_or_404(cur, client_id)
+
+        conn.commit()
+
+    return _client_result(client)
+
+
+@app.post("/clients/{client_id}/restore")
+def restore_client(
+    client_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_client_or_404(cur, client_id)
+
+            cur.execute(
+                """
+                UPDATE clients
+                SET
+                    is_archived = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (client_id,),
+            )
+
+            client = _get_client_or_404(cur, client_id)
+
+        conn.commit()
+
+    return _client_result(client)
+
+
+@app.post(
+    "/clients/{client_id}/create-order",
+    status_code=status.HTTP_201_CREATED,
+)
+def create_order_for_client(
+    client_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            client = _get_client_or_404(cur, client_id)
+
+            if client["is_archived"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nie można tworzyć zamówienia dla zarchiwizowanego klienta",
+                )
+
+            cur.execute(
+                """
+                INSERT INTO orders (
+                    client_id,
+                    client_name,
+                    name,
+                    source,
+                    size,
+                    quantity,
+                    price,
+                    paid_amount,
+                    payment_status,
+                    deadline,
+                    notes,
+                    status
+                )
+                VALUES (
+                    %s, %s, 'Nowe zamówienie', 'Panel klientów',
+                    '', 1, 0, 0, 'Nieopłacone',
+                    NULL, NULL, 'Nowe'
+                )
+                RETURNING id
+                """,
+                (
+                    client_id,
+                    client["display_name"],
+                ),
+            )
+
+            order_id = cur.fetchone()["id"]
+            order_number = f"YK-{order_id:05d}"
+
+            cur.execute(
+                """
+                UPDATE orders
+                SET
+                    order_number = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (order_number, order_id),
+            )
+
+            order = get_order_or_404(cur, order_id)
+
+        conn.commit()
+
+    return order
+
+
+@app.post("/orders/{order_id}/assign-client")
+def assign_client_to_order(
+    order_id: int,
+    data: AssignClientToOrder,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            get_order_or_404(cur, order_id)
+            client = _get_client_or_404(
+                cur,
+                data.client_id,
+            )
+
+            if client["is_archived"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nie można przypisać zarchiwizowanego klienta",
+                )
+
+            cur.execute(
+                """
+                UPDATE orders
+                SET
+                    client_id = %s,
+                    client_name = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    client["id"],
+                    client["display_name"],
+                    order_id,
+                ),
+            )
+
+            order = get_order_or_404(cur, order_id)
+
+        conn.commit()
+
+    return order

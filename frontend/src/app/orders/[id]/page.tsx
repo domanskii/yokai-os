@@ -1,5 +1,7 @@
 "use client";
 
+import { OrderClientSelector } from "../../../components/order-client-selector";
+
 import { OrderSvgAssets } from "../../../components/order-svg-assets";
 
 import {
@@ -536,6 +538,11 @@ export default function OrderDetailsPage() {
                 </div>
               </div>
             </section>
+
+            <OrderClientSelector
+              orderId={order.id}
+              currentClientName={order.client_name}
+            />
 
             <OrderSvgAssets
               orderId={order.id}
