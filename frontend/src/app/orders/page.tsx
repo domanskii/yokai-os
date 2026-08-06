@@ -118,6 +118,13 @@ function formatMoney(value: string | number) {
   }).format(Number(value || 0));
 }
 
+function parseMoney(value: string) {
+  const normalized = value.trim().replace(/\s/g, "").replace(",", ".");
+  const amount = Number(normalized);
+
+  return Number.isFinite(amount) ? amount : 0;
+}
+
 function formatDate(value: string | null) {
   if (!value) return "Brak terminu";
   return new Intl.DateTimeFormat("pl-PL").format(new Date(`${value}T12:00:00`));
@@ -224,8 +231,8 @@ function NewOrderModal({
           source: form.source,
           size: form.size || null,
           quantity: Number(form.quantity || 1),
-          price: Number(form.price || 0),
-          paid_amount: Number(form.paid_amount || 0),
+          price: parseMoney(form.price),
+          paid_amount: parseMoney(form.paid_amount),
           payment_status: form.payment_status,
           deadline: form.deadline || null,
           notes: form.notes || null,
@@ -318,21 +325,21 @@ function NewOrderModal({
           <label className="field">
             <span>Cena</span>
             <input
-              min="0"
-              step="0.01"
-              type="number"
+              type="text"
+              inputMode="decimal"
               value={form.price}
               onChange={(event) => update("price", event.target.value)}
+              placeholder="0,00"
             />
           </label>
           <label className="field">
             <span>Wpłacono</span>
             <input
-              min="0"
-              step="0.01"
-              type="number"
+              type="text"
+              inputMode="decimal"
               value={form.paid_amount}
               onChange={(event) => update("paid_amount", event.target.value)}
+              placeholder="0,00"
             />
           </label>
           <label className="field">
@@ -435,8 +442,8 @@ function OrderDrawer({
           source: form.source,
           size: form.size || null,
           quantity: Number(form.quantity),
-          price: Number(form.price || 0),
-          paid_amount: Number(form.paid_amount || 0),
+          price: parseMoney(form.price),
+          paid_amount: parseMoney(form.paid_amount),
           payment_status: form.payment_status,
           deadline: form.deadline || null,
           notes: form.notes || null,
@@ -566,11 +573,23 @@ function OrderDrawer({
           </label>
           <label className="field">
             <span>Cena</span>
-            <input min="0" step="0.01" type="number" value={form.price} onChange={(event) => update("price", event.target.value)} />
+            <input
+              type="text"
+              inputMode="decimal"
+              value={form.price}
+              onChange={(event) => update("price", event.target.value)}
+              placeholder="0,00"
+            />
           </label>
           <label className="field">
             <span>Wpłacono</span>
-            <input min="0" step="0.01" type="number" value={form.paid_amount} onChange={(event) => update("paid_amount", event.target.value)} />
+            <input
+              type="text"
+              inputMode="decimal"
+              value={form.paid_amount}
+              onChange={(event) => update("paid_amount", event.target.value)}
+              placeholder="0,00"
+            />
           </label>
           <label className="field">
             <span>Termin</span>
