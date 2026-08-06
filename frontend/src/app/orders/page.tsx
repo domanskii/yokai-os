@@ -104,7 +104,7 @@ const nav = [
   { label: "Dashboard", icon: Gauge, href: "/" },
   { label: "Produkcja", icon: Zap, href: "/production" },
   { label: "Zamówienia", icon: ShoppingBag, href: "/orders", active: true },
-  { label: "Biblioteka SVG", icon: FileImage, href: "/" },
+  { label: "Biblioteka SVG", icon: FileImage, href: "/library" },
   { label: "Kalkulator", icon: CircleDollarSign, href: "/calculator" },
   { label: "Materiały", icon: Boxes, href: "/materials" },
   { label: "Klienci", icon: Users, href: "/" },

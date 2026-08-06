@@ -28,6 +28,8 @@
     networks:
       - yokai_internal
 
+    volumes:
+      - /srv/yokai-data/svg:/srv/yokai-data/svg
   frontend:
     build:
       context: ./frontend

@@ -142,7 +142,7 @@ const nav: NavItem[] = [
   {
     label: "Biblioteka SVG",
     icon: FileImage,
-    href: "/",
+    href: "/library",
   },
   {
     label: "Kalkulator",

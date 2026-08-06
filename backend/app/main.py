@@ -6,8 +6,9 @@ from typing import Literal
 import bcrypt
 import jwt
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, status
 from psycopg.rows import dict_row
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -31,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.13.0")
+app = FastAPI(title="YOKAI OS API", version="0.14.0")
 
 
 class LoginRequest(BaseModel):
@@ -256,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.13.0",
+        "version": "0.14.0",
         "status": "running",
     }
 
@@ -670,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.13",
+                "User-Agent": "YOKAI-OS/0.14",
             },
             method="GET",
         )
@@ -1254,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.13",
+            "User-Agent": "YOKAI-OS/0.14",
         },
         method="GET",
     )
@@ -1408,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.13",
+            "User-Agent": "YOKAI-OS/0.14",
         },
         method="GET",
     )
@@ -2998,3 +2999,593 @@ def create_order_from_calculator(
         },
         "created": True,
     }
+
+# === YOKAI SVG LIBRARY V0.14 ===
+
+import hashlib as _svg_hashlib
+import re as _svg_re
+import uuid as _svg_uuid
+import xml.etree.ElementTree as _svg_etree
+from pathlib import Path as _SvgPath
+
+from psycopg.types.json import Jsonb as _SvgJsonb
+
+
+SVG_STORAGE_DIR = _SvgPath(
+    os.environ.get("SVG_STORAGE_DIR", "/srv/yokai-data/svg")
+)
+SVG_MAX_FILE_SIZE = 10 * 1024 * 1024
+
+
+class SvgAssetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=250)
+    category: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = None
+    client_name: str | None = Field(default=None, max_length=200)
+    order_id: int | None = Field(default=None, gt=0)
+    version_label: str | None = Field(default=None, max_length=50)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+def _ensure_svg_storage() -> None:
+    SVG_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _svg_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def _validate_svg(content: bytes) -> dict:
+    if not content:
+        raise HTTPException(status_code=400, detail="Plik SVG jest pusty")
+
+    if len(content) > SVG_MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="Plik SVG może mieć maksymalnie 10 MB",
+        )
+
+    try:
+        root = _svg_etree.fromstring(content)
+    except _svg_etree.ParseError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Plik nie jest prawidłowym SVG",
+        ) from exc
+
+    if _svg_local_name(root.tag) != "svg":
+        raise HTTPException(
+            status_code=400,
+            detail="Główny element musi być znacznikiem SVG",
+        )
+
+    blocked_prefixes = (
+        "javascript:",
+        "http://",
+        "https://",
+        "//",
+        "data:text/html",
+    )
+
+    for element in root.iter():
+        if _svg_local_name(element.tag) == "script":
+            raise HTTPException(
+                status_code=400,
+                detail="SVG zawiera niedozwolony skrypt",
+            )
+
+        for attribute, value in element.attrib.items():
+            attribute_name = _svg_local_name(attribute)
+            text_value = str(value).strip().lower()
+
+            if attribute_name.startswith("on"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="SVG zawiera niedozwolone zdarzenia",
+                )
+
+            if attribute_name in {"href", "src"} and text_value.startswith(
+                blocked_prefixes
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="SVG zawiera zewnętrzne odwołania",
+                )
+
+    return {
+        "svg_width": str(root.attrib.get("width") or "").strip() or None,
+        "svg_height": str(root.attrib.get("height") or "").strip() or None,
+        "view_box": str(
+            root.attrib.get("viewBox")
+            or root.attrib.get("viewbox")
+            or ""
+        ).strip()
+        or None,
+    }
+
+
+def _clean_svg_tags(tags: list[str] | str | None) -> list[str]:
+    if tags is None:
+        return []
+
+    values = tags.split(",") if isinstance(tags, str) else tags
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        cleaned = str(value).strip()
+
+        if not cleaned:
+            continue
+
+        normalized = cleaned.casefold()
+
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        result.append(cleaned[:80])
+
+    return result[:30]
+
+
+def _svg_result(row: dict) -> dict:
+    result = dict(row)
+    result["file_size"] = int(result.get("file_size") or 0)
+    result["tags"] = list(result.get("tags") or [])
+    return result
+
+
+def _get_svg_or_404(cur, asset_id: int) -> dict:
+    cur.execute(
+        """
+        SELECT
+            a.*,
+            o.order_number,
+            o.name AS order_name
+        FROM svg_assets a
+        LEFT JOIN orders o ON o.id = a.order_id
+        WHERE a.id = %s
+        """,
+        (asset_id,),
+    )
+
+    asset = cur.fetchone()
+
+    if asset is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono projektu SVG",
+        )
+
+    return asset
+
+
+@app.on_event("startup")
+def startup_svg_library():
+    _ensure_svg_storage()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS svg_assets (
+                    id BIGSERIAL PRIMARY KEY,
+                    asset_number TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    stored_filename TEXT UNIQUE NOT NULL,
+                    file_path TEXT UNIQUE NOT NULL,
+                    file_size BIGINT NOT NULL DEFAULT 0,
+                    sha256 TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'Grafika',
+                    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    client_name TEXT NOT NULL DEFAULT '',
+                    order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL,
+                    version_label TEXT NOT NULL DEFAULT 'v1',
+                    svg_width TEXT,
+                    svg_height TEXT,
+                    view_box TEXT,
+                    notes TEXT,
+                    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS svg_assets_active_index
+                ON svg_assets (is_archived, category, created_at DESC)
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS svg_assets_order_index
+                ON svg_assets (order_id, created_at DESC)
+                """
+            )
+
+        conn.commit()
+
+
+@app.get("/svg-assets/stats")
+def svg_asset_stats(user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                    ) AS active,
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                        AND order_id IS NOT NULL
+                    ) AS assigned,
+                    COUNT(DISTINCT category) FILTER (
+                        WHERE is_archived = FALSE
+                    ) AS categories,
+                    COALESCE(
+                        SUM(file_size) FILTER (
+                            WHERE is_archived = FALSE
+                        ),
+                        0
+                    ) AS total_size
+                FROM svg_assets
+                """
+            )
+            row = cur.fetchone()
+
+    return {
+        "active": int(row["active"] or 0),
+        "assigned": int(row["assigned"] or 0),
+        "categories": int(row["categories"] or 0),
+        "total_size": int(row["total_size"] or 0),
+    }
+
+
+@app.get("/svg-assets")
+def list_svg_assets(
+    search: str | None = Query(default=None, max_length=200),
+    archived: bool = False,
+    limit: int = Query(default=500, ge=1, le=1000),
+    user: dict = Depends(get_current_user),
+):
+    conditions = ["a.is_archived = %s"]
+    params: list[object] = [archived]
+
+    if search and search.strip():
+        phrase = f"%{search.strip()}%"
+
+        conditions.append(
+            """
+            (
+                a.asset_number ILIKE %s
+                OR a.name ILIKE %s
+                OR a.original_filename ILIKE %s
+                OR a.category ILIKE %s
+                OR a.client_name ILIKE %s
+                OR a.version_label ILIKE %s
+                OR COALESCE(o.order_number, '') ILIKE %s
+                OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(a.tags) AS tag
+                    WHERE tag ILIKE %s
+                )
+            )
+            """
+        )
+
+        params.extend([phrase] * 8)
+
+    params.append(limit)
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    a.*,
+                    o.order_number,
+                    o.name AS order_name
+                FROM svg_assets a
+                LEFT JOIN orders o ON o.id = a.order_id
+                WHERE {" AND ".join(conditions)}
+                ORDER BY a.created_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+    return [_svg_result(row) for row in rows]
+
+
+@app.post("/svg-assets", status_code=status.HTTP_201_CREATED)
+async def create_svg_asset(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    category: str = Form(default="Grafika"),
+    tags: str = Form(default=""),
+    client_name: str = Form(default=""),
+    order_id: int | None = Form(default=None),
+    version_label: str = Form(default="v1"),
+    notes: str = Form(default=""),
+    user: dict = Depends(get_current_user),
+):
+    original_filename = (file.filename or "projekt.svg").strip()
+
+    if not original_filename.lower().endswith(".svg"):
+        raise HTTPException(
+            status_code=400,
+            detail="Do biblioteki można dodać tylko pliki SVG",
+        )
+
+    content = await file.read()
+    dimensions = _validate_svg(content)
+    digest = _svg_hashlib.sha256(content).hexdigest()
+
+    if order_id is not None:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM orders WHERE id = %s",
+                    (order_id,),
+                )
+
+                if cur.fetchone() is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Nie znaleziono zamówienia",
+                    )
+
+    _ensure_svg_storage()
+    stored_filename = f"{_svg_uuid.uuid4().hex}.svg"
+    file_path = SVG_STORAGE_DIR / stored_filename
+
+    try:
+        file_path.write_bytes(content)
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO svg_assets (
+                        name,
+                        original_filename,
+                        stored_filename,
+                        file_path,
+                        file_size,
+                        sha256,
+                        category,
+                        tags,
+                        client_name,
+                        order_id,
+                        version_label,
+                        svg_width,
+                        svg_height,
+                        view_box,
+                        notes
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        name.strip(),
+                        original_filename,
+                        stored_filename,
+                        str(file_path),
+                        len(content),
+                        digest,
+                        category.strip() or "Grafika",
+                        _SvgJsonb(_clean_svg_tags(tags)),
+                        client_name.strip(),
+                        order_id,
+                        version_label.strip() or "v1",
+                        dimensions["svg_width"],
+                        dimensions["svg_height"],
+                        dimensions["view_box"],
+                        notes.strip() or None,
+                    ),
+                )
+
+                asset_id = cur.fetchone()["id"]
+                asset_number = f"SVG-{asset_id:05d}"
+
+                cur.execute(
+                    """
+                    UPDATE svg_assets
+                    SET asset_number = %s
+                    WHERE id = %s
+                    """,
+                    (asset_number, asset_id),
+                )
+
+                asset = _get_svg_or_404(cur, asset_id)
+
+            conn.commit()
+
+    except Exception:
+        if file_path.exists():
+            file_path.unlink()
+        raise
+
+    return _svg_result(asset)
+
+
+@app.get("/svg-assets/{asset_id}")
+def get_svg_asset(
+    asset_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            asset = _get_svg_or_404(cur, asset_id)
+
+    return _svg_result(asset)
+
+
+@app.get("/svg-assets/{asset_id}/file")
+def get_svg_asset_file(
+    asset_id: int,
+    download: bool = False,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            asset = _get_svg_or_404(cur, asset_id)
+
+    file_path = _SvgPath(asset["file_path"])
+
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Plik SVG nie istnieje na dysku",
+        )
+
+    safe_filename = _svg_re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        asset["original_filename"],
+    )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type="image/svg+xml",
+        filename=safe_filename,
+        content_disposition_type=(
+            "attachment" if download else "inline"
+        ),
+    )
+
+
+@app.patch("/svg-assets/{asset_id}")
+def update_svg_asset(
+    asset_id: int,
+    data: SvgAssetUpdate,
+    user: dict = Depends(get_current_user),
+):
+    values = data.model_dump(exclude_unset=True)
+
+    if not values:
+        raise HTTPException(
+            status_code=400,
+            detail="Brak danych do zapisania",
+        )
+
+    if values.get("order_id") is not None:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM orders WHERE id = %s",
+                    (values["order_id"],),
+                )
+
+                if cur.fetchone() is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Nie znaleziono zamówienia",
+                    )
+
+    allowed = {
+        "name",
+        "category",
+        "tags",
+        "client_name",
+        "order_id",
+        "version_label",
+        "notes",
+    }
+
+    assignments: list[str] = []
+    params: list[object] = []
+
+    for field, value in values.items():
+        if field not in allowed:
+            continue
+
+        if field == "tags":
+            value = _SvgJsonb(_clean_svg_tags(value))
+        elif isinstance(value, str):
+            value = value.strip()
+
+        assignments.append(f"{field} = %s")
+        params.append(value)
+
+    assignments.append("updated_at = NOW()")
+    params.append(asset_id)
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_svg_or_404(cur, asset_id)
+
+            cur.execute(
+                f"""
+                UPDATE svg_assets
+                SET {", ".join(assignments)}
+                WHERE id = %s
+                """,
+                params,
+            )
+
+            asset = _get_svg_or_404(cur, asset_id)
+
+        conn.commit()
+
+    return _svg_result(asset)
+
+
+@app.post("/svg-assets/{asset_id}/archive")
+def archive_svg_asset(
+    asset_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_svg_or_404(cur, asset_id)
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET is_archived = TRUE, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (asset_id,),
+            )
+
+            asset = _get_svg_or_404(cur, asset_id)
+
+        conn.commit()
+
+    return _svg_result(asset)
+
+
+@app.post("/svg-assets/{asset_id}/restore")
+def restore_svg_asset(
+    asset_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_svg_or_404(cur, asset_id)
+
+            cur.execute(
+                """
+                UPDATE svg_assets
+                SET is_archived = FALSE, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (asset_id,),
+            )
+
+            asset = _get_svg_or_404(cur, asset_id)
+
+        conn.commit()
+
+    return _svg_result(asset)
