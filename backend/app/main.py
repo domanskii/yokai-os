@@ -31,7 +31,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.11.0")
+app = FastAPI(title="YOKAI OS API", version="0.12.0")
 
 
 class LoginRequest(BaseModel):
@@ -256,7 +256,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.11.0",
+        "version": "0.12.0",
         "status": "running",
     }
 
@@ -670,7 +670,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.11",
+                "User-Agent": "YOKAI-OS/0.12",
             },
             method="GET",
         )
@@ -1254,7 +1254,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.11",
+            "User-Agent": "YOKAI-OS/0.12",
         },
         method="GET",
     )
@@ -1408,7 +1408,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.11",
+            "User-Agent": "YOKAI-OS/0.12",
         },
         method="GET",
     )
@@ -2505,6 +2505,349 @@ def create_calculation(
                 (calculation_id,),
             )
             result = cur.fetchone()
+        conn.commit()
+
+    return _calculation_result(result)
+
+
+# === YOKAI CALCULATOR EDIT DELETE RESTORE V0.12 ===
+
+
+def _ensure_calculator_v012_schema(cur) -> None:
+    _ensure_calculator_schema(cur)
+
+    cur.execute(
+        """
+        ALTER TABLE calculations
+        ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE calculations
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE calculations
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS calculations_deleted_index
+        ON calculations (is_deleted, created_at DESC)
+        """
+    )
+
+
+def _get_calculation_v012(cur, calculation_id: int, lock: bool = False) -> dict:
+    suffix = " FOR UPDATE" if lock else ""
+
+    cur.execute(
+        f"""
+        SELECT *
+        FROM calculations
+        WHERE id = %s
+        {suffix}
+        """,
+        (calculation_id,),
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono kalkulacji",
+        )
+
+    return row
+
+
+def _restore_previous_calculation_stock(cur, calculation: dict) -> None:
+    if not calculation.get("stock_deducted"):
+        return
+
+    for item in calculation.get("material_breakdown") or []:
+        try:
+            material_id = int(item.get("material_id") or 0)
+            used_length = _calc_decimal(item.get("used_length_m"))
+        except (TypeError, ValueError):
+            continue
+
+        if material_id <= 0 or used_length <= 0:
+            continue
+
+        cur.execute(
+            """
+            UPDATE materials
+            SET
+                stock_length_m = stock_length_m + %s,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (used_length, material_id),
+        )
+
+
+@app.get("/calculations/manage")
+def manage_calculations(
+    deleted: bool = False,
+    limit: int = Query(default=30, ge=1, le=500),
+    order_id: int | None = Query(default=None, gt=0),
+    user: dict = Depends(get_current_user),
+):
+    conditions = ["c.is_deleted = %s"]
+    params: list[object] = [deleted]
+
+    if order_id is not None:
+        conditions.append("c.order_id = %s")
+        params.append(order_id)
+
+    params.append(limit)
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_calculator_v012_schema(cur)
+
+            cur.execute(
+                f"""
+                SELECT
+                    c.*,
+                    o.order_number,
+                    o.client_name
+                FROM calculations c
+                LEFT JOIN orders o
+                    ON o.id = c.order_id
+                WHERE {" AND ".join(conditions)}
+                ORDER BY c.created_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+
+            rows = cur.fetchall()
+
+        conn.commit()
+
+    return [
+        _calculation_result(row)
+        for row in rows
+    ]
+
+
+@app.patch("/calculations/{calculation_id}")
+def update_calculation_v012(
+    calculation_id: int,
+    data: CalculationCreate,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_calculator_v012_schema(cur)
+
+            existing = _get_calculation_v012(
+                cur,
+                calculation_id,
+                lock=True,
+            )
+
+            if existing.get("is_deleted"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Przywróć kalkulację przed jej edycją"
+                    ),
+                )
+
+            if data.order_id:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM orders
+                    WHERE id = %s
+                      AND is_archived = FALSE
+                    """,
+                    (data.order_id,),
+                )
+
+                if cur.fetchone() is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Nie znaleziono aktywnego zamówienia",
+                    )
+
+            # Najpierw cofamy poprzednie zużycie. Jeżeli nowa kalkulacja
+            # nie przejdzie walidacji, transakcja wycofa także to cofnięcie.
+            _restore_previous_calculation_stock(
+                cur,
+                existing,
+            )
+
+            totals = _calculate_order_cost(
+                cur,
+                data,
+            )
+
+            if data.deduct_stock:
+                for material_id, used_length in totals["deductions"].items():
+                    cur.execute(
+                        """
+                        UPDATE materials
+                        SET
+                            stock_length_m = stock_length_m - %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (used_length, material_id),
+                    )
+
+            cur.execute(
+                """
+                UPDATE calculations
+                SET
+                    order_id = %s,
+                    name = %s,
+                    width_cm = %s,
+                    height_cm = %s,
+                    quantity = %s,
+                    waste_percent = %s,
+                    labor_minutes = %s,
+                    hourly_rate = %s,
+                    margin_percent = %s,
+                    base_area_m2 = %s,
+                    material_cost = %s,
+                    labor_cost = %s,
+                    total_cost = %s,
+                    suggested_price = %s,
+                    profit = %s,
+                    material_breakdown = %s,
+                    stock_deducted = %s,
+                    order_price_updated = %s,
+                    notes = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    data.order_id,
+                    data.name.strip(),
+                    data.width_cm,
+                    data.height_cm,
+                    data.quantity,
+                    data.waste_percent,
+                    data.labor_minutes,
+                    data.hourly_rate,
+                    data.margin_percent,
+                    totals["base_area"],
+                    totals["material_cost"],
+                    totals["labor_cost"],
+                    totals["total_cost"],
+                    totals["suggested_price"],
+                    totals["profit"],
+                    _CalcJsonb(totals["breakdown"]),
+                    data.deduct_stock,
+                    data.update_order_price,
+                    data.notes.strip() if data.notes else None,
+                    calculation_id,
+                ),
+            )
+
+            if data.order_id and data.update_order_price:
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        price = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        totals["suggested_price"],
+                        data.order_id,
+                    ),
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    c.*,
+                    o.order_number,
+                    o.client_name
+                FROM calculations c
+                LEFT JOIN orders o
+                    ON o.id = c.order_id
+                WHERE c.id = %s
+                """,
+                (calculation_id,),
+            )
+
+            result = cur.fetchone()
+
+        conn.commit()
+
+    return _calculation_result(result)
+
+
+@app.post("/calculations/{calculation_id}/delete")
+def soft_delete_calculation_v012(
+    calculation_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_calculator_v012_schema(cur)
+            _get_calculation_v012(cur, calculation_id)
+
+            cur.execute(
+                """
+                UPDATE calculations
+                SET
+                    is_deleted = TRUE,
+                    deleted_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (calculation_id,),
+            )
+
+            result = cur.fetchone()
+
+        conn.commit()
+
+    return _calculation_result(result)
+
+
+@app.post("/calculations/{calculation_id}/restore")
+def restore_calculation_v012(
+    calculation_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_calculator_v012_schema(cur)
+            _get_calculation_v012(cur, calculation_id)
+
+            cur.execute(
+                """
+                UPDATE calculations
+                SET
+                    is_deleted = FALSE,
+                    deleted_at = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (calculation_id,),
+            )
+
+            result = cur.fetchone()
+
         conn.commit()
 
     return _calculation_result(result)

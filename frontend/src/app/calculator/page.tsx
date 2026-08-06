@@ -8,8 +8,10 @@ import {
   Calculator,
   CircleDollarSign,
   LoaderCircle,
+  PencilLine,
   Plus,
   ReceiptText,
+  RotateCcw,
   Save,
   ShoppingBag,
   Trash2,
@@ -35,17 +37,37 @@ type Order = {
   name: string;
 };
 
+type HistoryMaterial = {
+  material_id: number;
+  name: string;
+  layers: number;
+  used_area_m2: number;
+  used_length_m: number;
+  cost: number;
+};
+
 type HistoryItem = {
   id: number;
   calculation_number: string;
+  order_id: number | null;
   order_number: string | null;
   name: string;
   width_cm: number;
   height_cm: number;
   quantity: number;
+  waste_percent: number;
+  labor_minutes: number;
+  hourly_rate: number;
+  margin_percent: number;
   total_cost: number;
   suggested_price: number;
+  material_breakdown: HistoryMaterial[];
+  stock_deducted: boolean;
+  order_price_updated: boolean;
+  notes: string | null;
+  is_deleted: boolean;
   created_at: string;
+  updated_at: string;
 };
 
 type Line = {
@@ -84,6 +106,8 @@ export default function CalculatorPage() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
   const [message, setMessage] = useState("");
 
   const [orderId, setOrderId] = useState("");
@@ -140,7 +164,7 @@ export default function CalculatorPage() {
         await Promise.all([
           api("/api/materials?archived=false"),
           api("/api/orders?archived=false&limit=500"),
-          api("/api/calculations?limit=20"),
+          api(`/api/calculations/manage?deleted=${showDeleted}&limit=20`),
         ]);
 
       if (
@@ -178,14 +202,14 @@ export default function CalculatorPage() {
 
   useEffect(() => {
     void load();
-  }, [token]);
+  }, [token, showDeleted]);
 
   useEffect(() => {
     const order = orders.find((item) => String(item.id) === orderId);
-    if (order) {
+    if (order && editingId === null) {
       setName(`${order.order_number} · ${order.name}`);
     }
-  }, [orderId, orders]);
+  }, [orderId, orders, editingId]);
 
   const result = useMemo(() => {
     const baseArea =
@@ -295,6 +319,108 @@ export default function CalculatorPage() {
     );
   };
 
+  const resetEditor = () => {
+    setEditingId(null);
+    setOrderId("");
+    setName("Kalkulacja naklejki");
+    setWidth("50");
+    setHeight("10");
+    setQuantity("1");
+    setWaste("15");
+    setLaborMinutes("30");
+    setHourlyRate("50");
+    setMargin("40");
+    setNotes("");
+    setDeductStock(false);
+    setUpdateOrderPrice(false);
+    setLines([
+      {
+        key: `line-${Date.now()}`,
+        material_id: "",
+        layers: "1",
+      },
+    ]);
+  };
+
+  const editCalculation = (item: HistoryItem) => {
+    setEditingId(item.id);
+    setOrderId(item.order_id ? String(item.order_id) : "");
+    setName(item.name);
+    setWidth(String(item.width_cm));
+    setHeight(String(item.height_cm));
+    setQuantity(String(item.quantity));
+    setWaste(String(item.waste_percent));
+    setLaborMinutes(String(item.labor_minutes));
+    setHourlyRate(String(item.hourly_rate));
+    setMargin(String(item.margin_percent));
+    setNotes(item.notes || "");
+    setDeductStock(item.stock_deducted);
+    setUpdateOrderPrice(item.order_price_updated);
+    setLines(
+      item.material_breakdown.length > 0
+        ? item.material_breakdown.map((line, index) => ({
+            key: `edit-${item.id}-${index}`,
+            material_id: String(line.material_id),
+            layers: String(line.layers),
+          }))
+        : [
+            {
+              key: `edit-${item.id}-0`,
+              material_id: "",
+              layers: "1",
+            },
+          ]
+    );
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    notify(`Edycja ${item.calculation_number}`);
+  };
+
+  const changeDeletedState = async (item: HistoryItem) => {
+    const action = item.is_deleted ? "restore" : "delete";
+
+    if (
+      !item.is_deleted &&
+      !window.confirm(
+        `Usunąć ${item.calculation_number}? Będzie można ją przywrócić.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const response = await api(
+        `/api/calculations/${item.id}/${action}`,
+        { method: "POST" }
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Operacja nie powiodła się"
+        );
+      }
+
+      if (editingId === item.id) {
+        resetEditor();
+      }
+
+      notify(
+        item.is_deleted
+          ? `Przywrócono ${item.calculation_number}`
+          : `Usunięto ${item.calculation_number}`
+      );
+      await load();
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Operacja nie powiodła się"
+      );
+    }
+  };
+
   const save = async () => {
     const validLines = lines.filter(
       (line) => line.material_id && parseNumber(line.layers) > 0
@@ -313,8 +439,12 @@ export default function CalculatorPage() {
     setSaving(true);
 
     try {
-      const response = await api("/api/calculations", {
-        method: "POST",
+      const response = await api(
+        editingId
+          ? `/api/calculations/${editingId}`
+          : "/api/calculations",
+        {
+        method: editingId ? "PATCH" : "POST",
         headers: {
           "Content-Type": "application/json",
         },
@@ -348,9 +478,12 @@ export default function CalculatorPage() {
         );
       }
 
-      notify(`Zapisano ${data.calculation_number}`);
-      setDeductStock(false);
-      setUpdateOrderPrice(false);
+      notify(
+        editingId
+          ? `Zaktualizowano ${data.calculation_number}`
+          : `Zapisano ${data.calculation_number}`
+      );
+      resetEditor();
       await load();
     } catch (error) {
       notify(
@@ -387,14 +520,30 @@ export default function CalculatorPage() {
             </button>
           </div>
 
-          <button
-            onClick={save}
-            disabled={saving}
-            className="primary-button"
-          >
-            <Save className="size-4" />
-            {saving ? "Zapisywanie..." : "Zapisz"}
-          </button>
+          <div className="flex gap-2">
+            {editingId !== null && (
+              <button
+                onClick={resetEditor}
+                className="secondary-button"
+              >
+                <RotateCcw className="size-4" />
+                Anuluj edycję
+              </button>
+            )}
+
+            <button
+              onClick={save}
+              disabled={saving}
+              className="primary-button"
+            >
+              <Save className="size-4" />
+              {saving
+                ? "Zapisywanie..."
+                : editingId !== null
+                  ? "Zapisz zmiany"
+                  : "Zapisz"}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -409,6 +558,22 @@ export default function CalculatorPage() {
           <p className="mt-2 text-sm text-white/40">
             Materiały, odpad, robocizna, marża i zapis do zamówienia.
           </p>
+
+          {editingId !== null && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-violet-400/25 bg-violet-400/[.07] px-4 py-3">
+              <div className="flex items-center gap-2 text-sm text-violet-100">
+                <PencilLine className="size-4" />
+                Edytujesz zapisaną kalkulację. Zapis zastąpi jej dotychczasowe dane.
+              </div>
+              <button
+                onClick={resetEditor}
+                className="secondary-button compact"
+              >
+                <RotateCcw className="size-4" />
+                Cofnij edycję
+              </button>
+            </div>
+          )}
         </section>
 
         {loading ? (
@@ -758,7 +923,11 @@ export default function CalculatorPage() {
                   className="primary-button mt-5 w-full justify-center"
                 >
                   <Save className="size-4" />
-                  {saving ? "Zapisywanie..." : "Zapisz kalkulację"}
+                  {saving
+                    ? "Zapisywanie..."
+                    : editingId !== null
+                      ? "Zapisz zmiany"
+                      : "Zapisz kalkulację"}
                 </button>
               </section>
             </aside>
@@ -766,24 +935,36 @@ export default function CalculatorPage() {
         )}
 
         <section className="surface-card mt-5 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-white/[.055] p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[.055] p-5">
             <div className="flex items-center gap-2 font-semibold">
               <ShoppingBag className="size-5 text-violet-300" />
-              Ostatnie kalkulacje
+              {showDeleted ? "Usunięte kalkulacje" : "Ostatnie kalkulacje"}
             </div>
-            <span className="text-xs text-white/30">{history.length}</span>
+
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-white/30">{history.length}</span>
+              <button
+                onClick={() => setShowDeleted((current) => !current)}
+                className="secondary-button compact"
+              >
+                <RotateCcw className="size-4" />
+                {showDeleted ? "Wróć do aktywnych" : "Pokaż usunięte"}
+              </button>
+            </div>
           </div>
 
           {history.length === 0 ? (
             <div className="grid min-h-[180px] place-items-center text-sm text-white/30">
-              Brak zapisanych kalkulacji
+              {showDeleted
+                ? "Brak usuniętych kalkulacji"
+                : "Brak zapisanych kalkulacji"}
             </div>
           ) : (
             <div className="divide-y divide-white/[.045]">
               {history.map((item) => (
                 <div
                   key={item.id}
-                  className="grid gap-3 px-5 py-4 sm:grid-cols-[130px_1fr_130px_130px] sm:items-center"
+                  className="grid gap-3 px-5 py-4 sm:grid-cols-[130px_1fr_120px_120px_auto] sm:items-center"
                 >
                   <div className="text-xs font-semibold text-violet-200">
                     {item.calculation_number}
@@ -809,6 +990,38 @@ export default function CalculatorPage() {
                     <strong className="text-sm text-emerald-300">
                       {money(item.suggested_price)}
                     </strong>
+                  </div>
+
+                  <div className="flex justify-end gap-2">
+                    {item.is_deleted ? (
+                      <button
+                        onClick={() => void changeDeletedState(item)}
+                        className="secondary-button compact"
+                        title="Cofnij usunięcie"
+                      >
+                        <RotateCcw className="size-4" />
+                        Przywróć
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => editCalculation(item)}
+                          className="secondary-button compact"
+                          title="Edytuj kalkulację"
+                        >
+                          <PencilLine className="size-4" />
+                          Edytuj
+                        </button>
+
+                        <button
+                          onClick={() => void changeDeletedState(item)}
+                          className="icon-button text-red-200"
+                          title="Usuń kalkulację"
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
