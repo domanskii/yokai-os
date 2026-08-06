@@ -31,7 +31,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.9.0")
+app = FastAPI(title="YOKAI OS API", version="0.10.0")
 
 
 class LoginRequest(BaseModel):
@@ -256,7 +256,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.9.0",
+        "version": "0.10.0",
         "status": "running",
     }
 
@@ -670,7 +670,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.9",
+                "User-Agent": "YOKAI-OS/0.10",
             },
             method="GET",
         )
@@ -1254,7 +1254,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.9",
+            "User-Agent": "YOKAI-OS/0.10",
         },
         method="GET",
     )
@@ -1408,7 +1408,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.9",
+            "User-Agent": "YOKAI-OS/0.10",
         },
         method="GET",
     )
@@ -1763,3 +1763,446 @@ def get_woocommerce_order_details(
             order.get("meta_data")
         ),
     }
+
+
+
+# === YOKAI MATERIALS V0.10 ===
+
+
+class MaterialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    brand: str = Field(default="", max_length=100)
+    series: str = Field(default="", max_length=100)
+    category: str = Field(default="Folia ploterowa", max_length=100)
+    color_name: str = Field(default="", max_length=150)
+    color_code: str = Field(default="", max_length=100)
+    width_cm: Decimal = Field(gt=0, le=500)
+    roll_length_m: Decimal = Field(gt=0, le=10000)
+    purchase_price: Decimal = Field(default=Decimal("0"), ge=0)
+    stock_length_m: Decimal = Field(default=Decimal("0"), ge=0)
+    low_stock_threshold_m: Decimal = Field(default=Decimal("5"), ge=0)
+    supplier: str = Field(default="", max_length=200)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+class MaterialUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    brand: str | None = Field(default=None, max_length=100)
+    series: str | None = Field(default=None, max_length=100)
+    category: str | None = Field(default=None, max_length=100)
+    color_name: str | None = Field(default=None, max_length=150)
+    color_code: str | None = Field(default=None, max_length=100)
+    width_cm: Decimal | None = Field(default=None, gt=0, le=500)
+    roll_length_m: Decimal | None = Field(default=None, gt=0, le=10000)
+    purchase_price: Decimal | None = Field(default=None, ge=0)
+    stock_length_m: Decimal | None = Field(default=None, ge=0)
+    low_stock_threshold_m: Decimal | None = Field(default=None, ge=0)
+    supplier: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+@app.on_event("startup")
+def startup_materials():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS materials (
+                    id BIGSERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    brand TEXT NOT NULL DEFAULT '',
+                    series TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT 'Folia ploterowa',
+                    color_name TEXT NOT NULL DEFAULT '',
+                    color_code TEXT NOT NULL DEFAULT '',
+                    width_cm NUMERIC(10, 2) NOT NULL CHECK (width_cm > 0),
+                    roll_length_m NUMERIC(12, 2) NOT NULL CHECK (roll_length_m > 0),
+                    purchase_price NUMERIC(12, 2) NOT NULL DEFAULT 0
+                        CHECK (purchase_price >= 0),
+                    stock_length_m NUMERIC(12, 2) NOT NULL DEFAULT 0
+                        CHECK (stock_length_m >= 0),
+                    low_stock_threshold_m NUMERIC(12, 2) NOT NULL DEFAULT 5
+                        CHECK (low_stock_threshold_m >= 0),
+                    supplier TEXT NOT NULL DEFAULT '',
+                    notes TEXT,
+                    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS materials_active_index
+                ON materials (is_archived, category, brand, series)
+                """
+            )
+
+        conn.commit()
+
+
+def _material_result(row: dict) -> dict:
+    result = dict(row)
+
+    width_cm = Decimal(str(result.get("width_cm") or 0))
+    roll_length_m = Decimal(str(result.get("roll_length_m") or 0))
+    purchase_price = Decimal(str(result.get("purchase_price") or 0))
+    stock_length_m = Decimal(str(result.get("stock_length_m") or 0))
+    threshold = Decimal(
+        str(result.get("low_stock_threshold_m") or 0)
+    )
+
+    width_m = width_cm / Decimal("100")
+    roll_area = width_m * roll_length_m
+    stock_area = width_m * stock_length_m
+
+    cost_per_m2 = (
+        purchase_price / roll_area
+        if roll_area > 0
+        else Decimal("0")
+    )
+
+    stock_value = cost_per_m2 * stock_area
+
+    result["width_cm"] = float(width_cm)
+    result["roll_length_m"] = float(roll_length_m)
+    result["purchase_price"] = float(purchase_price)
+    result["stock_length_m"] = float(stock_length_m)
+    result["low_stock_threshold_m"] = float(threshold)
+    result["roll_area_m2"] = round(float(roll_area), 3)
+    result["stock_area_m2"] = round(float(stock_area), 3)
+    result["cost_per_m2"] = round(float(cost_per_m2), 4)
+    result["estimated_stock_value"] = round(float(stock_value), 2)
+    result["is_low_stock"] = stock_length_m <= threshold
+
+    return result
+
+
+def _get_material_or_404(cur, material_id: int) -> dict:
+    cur.execute(
+        """
+        SELECT *
+        FROM materials
+        WHERE id = %s
+        """,
+        (material_id,),
+    )
+
+    material = cur.fetchone()
+
+    if material is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono materiału",
+        )
+
+    return material
+
+
+@app.get("/materials")
+def list_materials(
+    search: str | None = Query(default=None, max_length=200),
+    archived: bool = False,
+    user: dict = Depends(get_current_user),
+):
+    conditions = ["is_archived = %s"]
+    params: list[object] = [archived]
+
+    if search and search.strip():
+        phrase = f"%{search.strip()}%"
+
+        conditions.append(
+            """
+            (
+                name ILIKE %s
+                OR brand ILIKE %s
+                OR series ILIKE %s
+                OR category ILIKE %s
+                OR color_name ILIKE %s
+                OR color_code ILIKE %s
+                OR supplier ILIKE %s
+            )
+            """
+        )
+
+        params.extend(
+            [
+                phrase,
+                phrase,
+                phrase,
+                phrase,
+                phrase,
+                phrase,
+                phrase,
+            ]
+        )
+
+    query = f"""
+        SELECT *
+        FROM materials
+        WHERE {" AND ".join(conditions)}
+        ORDER BY
+            category ASC,
+            brand ASC,
+            series ASC,
+            color_name ASC,
+            name ASC
+    """
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    return [_material_result(row) for row in rows]
+
+
+@app.get("/materials/stats")
+def material_stats(
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM materials
+                WHERE is_archived = FALSE
+                """
+            )
+
+            rows = cur.fetchall()
+
+    materials = [_material_result(row) for row in rows]
+
+    return {
+        "total_materials": len(materials),
+        "low_stock": sum(
+            1 for item in materials
+            if item["is_low_stock"]
+        ),
+        "stock_area_m2": round(
+            sum(item["stock_area_m2"] for item in materials),
+            2,
+        ),
+        "estimated_stock_value": round(
+            sum(
+                item["estimated_stock_value"]
+                for item in materials
+            ),
+            2,
+        ),
+    }
+
+
+@app.get("/materials/{material_id}")
+def get_material(
+    material_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            material = _get_material_or_404(
+                cur,
+                material_id,
+            )
+
+    return _material_result(material)
+
+
+@app.post(
+    "/materials",
+    status_code=status.HTTP_201_CREATED,
+)
+def create_material(
+    data: MaterialCreate,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO materials (
+                    name,
+                    brand,
+                    series,
+                    category,
+                    color_name,
+                    color_code,
+                    width_cm,
+                    roll_length_m,
+                    purchase_price,
+                    stock_length_m,
+                    low_stock_threshold_m,
+                    supplier,
+                    notes
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    data.name.strip(),
+                    data.brand.strip(),
+                    data.series.strip(),
+                    data.category.strip(),
+                    data.color_name.strip(),
+                    data.color_code.strip(),
+                    data.width_cm,
+                    data.roll_length_m,
+                    data.purchase_price,
+                    data.stock_length_m,
+                    data.low_stock_threshold_m,
+                    data.supplier.strip(),
+                    data.notes.strip()
+                    if data.notes
+                    else None,
+                ),
+            )
+
+            material = cur.fetchone()
+
+        conn.commit()
+
+    return _material_result(material)
+
+
+@app.patch("/materials/{material_id}")
+def update_material(
+    material_id: int,
+    data: MaterialUpdate,
+    user: dict = Depends(get_current_user),
+):
+    values = data.model_dump(exclude_unset=True)
+
+    if not values:
+        raise HTTPException(
+            status_code=400,
+            detail="Brak danych do zapisania",
+        )
+
+    allowed_columns = {
+        "name",
+        "brand",
+        "series",
+        "category",
+        "color_name",
+        "color_code",
+        "width_cm",
+        "roll_length_m",
+        "purchase_price",
+        "stock_length_m",
+        "low_stock_threshold_m",
+        "supplier",
+        "notes",
+    }
+
+    assignments: list[str] = []
+    params: list[object] = []
+
+    for field, value in values.items():
+        if field not in allowed_columns:
+            continue
+
+        if isinstance(value, str):
+            value = value.strip()
+
+        assignments.append(f"{field} = %s")
+        params.append(value)
+
+    if not assignments:
+        raise HTTPException(
+            status_code=400,
+            detail="Brak danych do zapisania",
+        )
+
+    assignments.append("updated_at = NOW()")
+    params.append(material_id)
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_material_or_404(
+                cur,
+                material_id,
+            )
+
+            cur.execute(
+                f"""
+                UPDATE materials
+                SET {", ".join(assignments)}
+                WHERE id = %s
+                RETURNING *
+                """,
+                params,
+            )
+
+            material = cur.fetchone()
+
+        conn.commit()
+
+    return _material_result(material)
+
+
+@app.post("/materials/{material_id}/archive")
+def archive_material(
+    material_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_material_or_404(
+                cur,
+                material_id,
+            )
+
+            cur.execute(
+                """
+                UPDATE materials
+                SET
+                    is_archived = TRUE,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (material_id,),
+            )
+
+            material = cur.fetchone()
+
+        conn.commit()
+
+    return _material_result(material)
+
+
+@app.post("/materials/{material_id}/restore")
+def restore_material(
+    material_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _get_material_or_404(
+                cur,
+                material_id,
+            )
+
+            cur.execute(
+                """
+                UPDATE materials
+                SET
+                    is_archived = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (material_id,),
+            )
+
+            material = cur.fetchone()
+
+        conn.commit()
+
+    return _material_result(material)

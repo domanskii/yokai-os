@@ -152,7 +152,7 @@ const nav: NavItem[] = [
   {
     label: "Materiały",
     icon: Boxes,
-    href: "/",
+    href: "/materials",
   },
   {
     label: "Klienci",
