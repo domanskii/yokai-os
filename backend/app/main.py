@@ -37,7 +37,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.4.0")
+app = FastAPI(title="YOKAI OS API", version="0.5.0")
 
 
 class LoginRequest(BaseModel):
@@ -227,7 +227,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "status": "running",
     }
 
@@ -574,3 +574,418 @@ def restore_order(
         conn.commit()
 
     return order
+
+
+# === YOKAI WOOCOMMERCE IMPORT V0.5 ===
+
+import base64 as _wc_base64
+import json as _wc_json
+import urllib.error as _wc_urlerror
+import urllib.parse as _wc_urlparse
+import urllib.request as _wc_urlrequest
+
+
+_WC_STATUS_MAP = {
+    "pending": "Nowe",
+    "on-hold": "Akceptacja",
+    "processing": "Do cięcia",
+    "completed": "Zrealizowane",
+    "cancelled": "Anulowane",
+    "refunded": "Anulowane",
+    "failed": "Anulowane",
+}
+
+
+def _wc_configuration() -> tuple[str, str, str]:
+    url = os.environ.get("WC_URL", "").strip().rstrip("/")
+    key = os.environ.get("WC_CONSUMER_KEY", "").strip()
+    secret = os.environ.get("WC_CONSUMER_SECRET", "").strip()
+
+    if not url or not key or not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Brak konfiguracji WooCommerce w backendzie",
+        )
+
+    return url, key, secret
+
+
+def _wc_fetch_orders(limit: int) -> list[dict]:
+    url, key, secret = _wc_configuration()
+
+    authorization = _wc_base64.b64encode(
+        f"{key}:{secret}".encode("utf-8")
+    ).decode("ascii")
+
+    collected: list[dict] = []
+    page = 1
+
+    while len(collected) < limit:
+        per_page = min(100, limit - len(collected))
+
+        query = _wc_urlparse.urlencode(
+            {
+                "per_page": per_page,
+                "page": page,
+                "orderby": "date",
+                "order": "desc",
+            }
+        )
+
+        endpoint = f"{url}/wp-json/wc/v3/orders?{query}"
+
+        request = _wc_urlrequest.Request(
+            endpoint,
+            headers={
+                "Authorization": f"Basic {authorization}",
+                "Accept": "application/json",
+                "User-Agent": "YOKAI-OS/0.5",
+            },
+            method="GET",
+        )
+
+        try:
+            with _wc_urlrequest.urlopen(request, timeout=30) as response:
+                raw = response.read().decode("utf-8")
+        except _wc_urlerror.HTTPError as exc:
+            raw_error = exc.read().decode("utf-8", errors="replace")
+
+            try:
+                error_data = _wc_json.loads(raw_error)
+                message = error_data.get("message", raw_error)
+            except Exception:
+                message = raw_error
+
+            raise HTTPException(
+                status_code=502,
+                detail=f"WooCommerce HTTP {exc.code}: {message}",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Nie udało się połączyć z WooCommerce: {exc}",
+            ) from exc
+
+        try:
+            batch = _wc_json.loads(raw)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="WooCommerce zwrócił nieprawidłowy JSON",
+            ) from exc
+
+        if not isinstance(batch, list):
+            raise HTTPException(
+                status_code=502,
+                detail="WooCommerce zwrócił nieprawidłową listę zamówień",
+            )
+
+        collected.extend(batch)
+
+        if len(batch) < per_page:
+            break
+
+        page += 1
+
+    return collected[:limit]
+
+
+def _wc_customer_name(order: dict) -> str:
+    billing = order.get("billing") or {}
+
+    company = str(billing.get("company") or "").strip()
+    first_name = str(billing.get("first_name") or "").strip()
+    last_name = str(billing.get("last_name") or "").strip()
+    email = str(billing.get("email") or "").strip()
+
+    full_name = " ".join(
+        part for part in [first_name, last_name] if part
+    ).strip()
+
+    return company or full_name or email or "Klient WooCommerce"
+
+
+def _wc_order_name(order: dict) -> str:
+    line_items = order.get("line_items") or []
+    labels: list[str] = []
+
+    for item in line_items[:4]:
+        name = str(item.get("name") or "Produkt").strip()
+        quantity = int(item.get("quantity") or 1)
+        labels.append(f"{name} × {quantity}")
+
+    if len(line_items) > 4:
+        labels.append(f"+ {len(line_items) - 4} poz.")
+
+    return " • ".join(labels) or f"Zamówienie WooCommerce #{order.get('number')}"
+
+
+def _wc_quantity(order: dict) -> int:
+    total = 0
+
+    for item in order.get("line_items") or []:
+        try:
+            total += int(item.get("quantity") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    return max(total, 1)
+
+
+def _wc_payment(order: dict) -> tuple[Decimal, str]:
+    total = Decimal(str(order.get("total") or "0"))
+    wc_status = str(order.get("status") or "").strip()
+
+    if wc_status == "refunded":
+        return Decimal("0"), "Zwrot"
+
+    if order.get("date_paid"):
+        return total, "Opłacone"
+
+    return Decimal("0"), "Nieopłacone"
+
+
+def _wc_notes(order: dict) -> str:
+    lines = [
+        f"WooCommerce #{order.get('number')}",
+    ]
+
+    payment_method = str(order.get("payment_method_title") or "").strip()
+    if payment_method:
+        lines.append(f"Płatność: {payment_method}")
+
+    shipping_lines = order.get("shipping_lines") or []
+    shipping_names = [
+        str(item.get("method_title") or "").strip()
+        for item in shipping_lines
+        if str(item.get("method_title") or "").strip()
+    ]
+
+    if shipping_names:
+        lines.append(f"Dostawa: {', '.join(shipping_names)}")
+
+    customer_note = str(order.get("customer_note") or "").strip()
+    if customer_note:
+        lines.append(f"Uwagi klienta: {customer_note}")
+
+    return "\n".join(lines)
+
+
+def _ensure_woocommerce_schema(cur) -> None:
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS woocommerce_order_id BIGINT
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS woocommerce_order_number TEXT
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS woocommerce_status TEXT
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS woocommerce_synced_at TIMESTAMPTZ
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS orders_woocommerce_order_id_unique
+        ON orders (woocommerce_order_id)
+        WHERE woocommerce_order_id IS NOT NULL
+        """
+    )
+
+
+@app.get("/woocommerce/status")
+def woocommerce_status(
+    user: dict = Depends(get_current_user),
+):
+    url = os.environ.get("WC_URL", "").strip().rstrip("/")
+    key = os.environ.get("WC_CONSUMER_KEY", "").strip()
+    secret = os.environ.get("WC_CONSUMER_SECRET", "").strip()
+
+    return {
+        "configured": bool(url and key and secret),
+        "url": url or None,
+    }
+
+
+@app.post("/woocommerce/import")
+def import_woocommerce_orders(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: dict = Depends(get_current_user),
+):
+    woo_orders = _wc_fetch_orders(limit)
+
+    created = 0
+    updated = 0
+    imported_numbers: list[str] = []
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_woocommerce_schema(cur)
+
+            for woo_order in woo_orders:
+                woo_id = int(woo_order["id"])
+                woo_number = str(
+                    woo_order.get("number") or woo_id
+                ).strip()
+                woo_status = str(
+                    woo_order.get("status") or ""
+                ).strip()
+
+                client_name = _wc_customer_name(woo_order)
+                order_name = _wc_order_name(woo_order)
+                quantity = _wc_quantity(woo_order)
+
+                price = Decimal(
+                    str(woo_order.get("total") or "0")
+                )
+
+                paid_amount, payment_status = _wc_payment(
+                    woo_order
+                )
+
+                production_status = _WC_STATUS_MAP.get(
+                    woo_status,
+                    "Nowe",
+                )
+
+                notes = _wc_notes(woo_order)
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM orders
+                    WHERE woocommerce_order_id = %s
+                    """,
+                    (woo_id,),
+                )
+
+                existing = cur.fetchone()
+
+                if existing:
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET
+                            client_name = %s,
+                            name = %s,
+                            source = 'WooCommerce',
+                            quantity = %s,
+                            price = %s,
+                            paid_amount = %s,
+                            payment_status = %s,
+                            woocommerce_order_number = %s,
+                            woocommerce_status = %s,
+                            woocommerce_synced_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (
+                            client_name,
+                            order_name,
+                            quantity,
+                            price,
+                            paid_amount,
+                            payment_status,
+                            woo_number,
+                            woo_status,
+                            existing["id"],
+                        ),
+                    )
+
+                    updated += 1
+                    continue
+
+                cur.execute(
+                    """
+                    INSERT INTO orders (
+                        client_name,
+                        name,
+                        source,
+                        size,
+                        quantity,
+                        price,
+                        paid_amount,
+                        payment_status,
+                        deadline,
+                        notes,
+                        status,
+                        woocommerce_order_id,
+                        woocommerce_order_number,
+                        woocommerce_status,
+                        woocommerce_synced_at
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        'WooCommerce',
+                        NULL,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NULL,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NOW()
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        client_name,
+                        order_name,
+                        quantity,
+                        price,
+                        paid_amount,
+                        payment_status,
+                        notes,
+                        production_status,
+                        woo_id,
+                        woo_number,
+                        woo_status,
+                    ),
+                )
+
+                order_id = cur.fetchone()["id"]
+                order_number = f"YK-{order_id:05d}"
+
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        order_number = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (order_number, order_id),
+                )
+
+                created += 1
+                imported_numbers.append(order_number)
+
+        conn.commit()
+
+    return {
+        "received": len(woo_orders),
+        "created": created,
+        "updated": updated,
+        "imported_numbers": imported_numbers[:20],
+    }

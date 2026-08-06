@@ -644,6 +644,7 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [mobileNav, setMobileNav] = useState(false);
   const [newOrder, setNewOrder] = useState(false);
+  const [importingWoo, setImportingWoo] = useState(false);
   const [toast, setToast] = useState("");
 
   const showToast = (message: string) => {
@@ -736,6 +737,41 @@ export default function OrdersPage() {
     () => orders.reduce((sum, order) => sum + Number(order.price), 0),
     [orders]
   );
+
+  const importWooCommerce = async () => {
+    setImportingWoo(true);
+
+    try {
+      const response = await authorizedFetch(
+        "/api/woocommerce/import?limit=100",
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail || "Nie udało się zaimportować zamówień"
+        );
+      }
+
+      showToast(
+        `WooCommerce: ${data.created} nowych, ${data.updated} zaktualizowanych`
+      );
+
+      await loadData();
+    } catch (importError) {
+      showToast(
+        importError instanceof Error
+          ? importError.message
+          : "Nie udało się zaimportować zamówień"
+      );
+    } finally {
+      setImportingWoo(false);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-[#090b10] text-white">
@@ -856,10 +892,28 @@ export default function OrdersPage() {
                 Sklep, polecenia i zlecenia bezpośrednie w jednym miejscu.
               </p>
             </div>
-            <button onClick={() => setNewOrder(true)} className="primary-button self-start md:self-auto">
-              <Plus className="size-4" />
-              Nowe zamówienie
-            </button>
+            <div className="flex flex-wrap gap-3 self-start md:self-auto">
+              <button
+                onClick={importWooCommerce}
+                disabled={importingWoo}
+                className="secondary-button disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RotateCcw
+                  className={`size-4 ${importingWoo ? "animate-spin" : ""}`}
+                />
+                {importingWoo
+                  ? "Importowanie..."
+                  : "Importuj z WooCommerce"}
+              </button>
+
+              <button
+                onClick={() => setNewOrder(true)}
+                className="primary-button"
+              >
+                <Plus className="size-4" />
+                Nowe zamówienie
+              </button>
+            </div>
           </section>
 
           <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
