@@ -1,4 +1,4 @@
-services:
+﻿services:
   database:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -33,7 +33,7 @@ services:
       context: ./frontend
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3101:80"
+      - "127.0.0.1:3101:3000"
     networks:
       - yokai_internal
 
@@ -42,3 +42,4 @@ networks:
 
 volumes:
   yokai_database:
+
