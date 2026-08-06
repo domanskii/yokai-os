@@ -76,6 +76,20 @@ type Stats = {
   status_counts: Record<string, number>;
 };
 
+type WooSyncStatus = {
+  configured: boolean;
+  interval_minutes: number;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  last_received: number;
+  last_created: number;
+  last_updated: number;
+  is_running: boolean;
+  trigger: string | null;
+};
+
 const statuses: OrderStatus[] = [
   "Nowe",
   "Projekt",
@@ -134,6 +148,15 @@ function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("pl-PL", {
     dateStyle: "medium",
     timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function formatSyncDate(value: string | null) {
+  if (!value) return "jeszcze nie wykonano";
+
+  return new Intl.DateTimeFormat("pl-PL", {
+    dateStyle: "short",
+    timeStyle: "medium",
   }).format(new Date(value));
 }
 
@@ -645,6 +668,7 @@ export default function OrdersPage() {
   const [mobileNav, setMobileNav] = useState(false);
   const [newOrder, setNewOrder] = useState(false);
   const [importingWoo, setImportingWoo] = useState(false);
+  const [wooSync, setWooSync] = useState<WooSyncStatus | null>(null);
   const [toast, setToast] = useState("");
 
   const showToast = (message: string) => {
@@ -674,6 +698,22 @@ export default function OrdersPage() {
     }
 
     return response;
+  };
+
+  const loadWooSync = async () => {
+    if (!token) return;
+
+    try {
+      const response = await authorizedFetch(
+        "/api/woocommerce/sync-status"
+      );
+
+      if (response.ok) {
+        setWooSync(await response.json());
+      }
+    } catch {
+      // Główna lista zamówień pozostaje dostępna.
+    }
   };
 
   const loadData = async () => {
@@ -733,6 +773,19 @@ export default function OrdersPage() {
     return () => window.clearTimeout(timer);
   }, [token, search, statusFilter, paymentFilter, showArchived]);
 
+  useEffect(() => {
+    if (!token) return;
+
+    loadWooSync();
+
+    const timer = window.setInterval(
+      loadWooSync,
+      30000
+    );
+
+    return () => window.clearInterval(timer);
+  }, [token]);
+
   const filteredValue = useMemo(
     () => orders.reduce((sum, order) => sum + Number(order.price), 0),
     [orders]
@@ -762,6 +815,7 @@ export default function OrdersPage() {
       );
 
       await loadData();
+      await loadWooSync();
     } catch (importError) {
       showToast(
         importError instanceof Error
@@ -891,6 +945,34 @@ export default function OrdersPage() {
               <p className="mt-2 text-sm text-white/38">
                 Sklep, polecenia i zlecenia bezpośrednie w jednym miejscu.
               </p>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                <span className="rounded-full border border-emerald-400/20 bg-emerald-400/[.06] px-2.5 py-1 text-emerald-200">
+                  Auto-sync co {wooSync?.interval_minutes ?? 10} min
+                </span>
+
+                <span className="text-white/35">
+                  Ostatnio:{" "}
+                  {formatSyncDate(
+                    wooSync?.last_success_at ?? null
+                  )}
+                </span>
+
+                {wooSync?.is_running && (
+                  <span className="text-violet-300">
+                    Synchronizacja trwa...
+                  </span>
+                )}
+
+                {wooSync?.last_error && (
+                  <span
+                    className="max-w-xl truncate text-red-300"
+                    title={wooSync.last_error}
+                  >
+                    Błąd: {wooSync.last_error}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="flex flex-wrap gap-3 self-start md:self-auto">
               <button

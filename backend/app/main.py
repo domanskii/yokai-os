@@ -37,7 +37,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.5.0")
+app = FastAPI(title="YOKAI OS API", version="0.6.0")
 
 
 class LoginRequest(BaseModel):
@@ -227,7 +227,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "status": "running",
     }
 
@@ -583,6 +583,8 @@ import json as _wc_json
 import urllib.error as _wc_urlerror
 import urllib.parse as _wc_urlparse
 import urllib.request as _wc_urlrequest
+import threading as _wc_threading
+import time as _wc_time
 
 
 _WC_STATUS_MAP = {
@@ -639,7 +641,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.5",
+                "User-Agent": "YOKAI-OS/0.6",
             },
             method="GET",
         )
@@ -823,77 +825,215 @@ def woocommerce_status(
     }
 
 
-@app.post("/woocommerce/import")
-def import_woocommerce_orders(
-    limit: int = Query(default=100, ge=1, le=500),
-    user: dict = Depends(get_current_user),
-):
-    woo_orders = _wc_fetch_orders(limit)
+_WC_SYNC_LOCK = _wc_threading.Lock()
+_WC_SYNC_WORKER_STARTED = False
+_WC_SYNC_INTERVAL_SECONDS = 600
 
-    created = 0
-    updated = 0
-    imported_numbers: list[str] = []
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            _ensure_woocommerce_schema(cur)
+def _ensure_wc_sync_schema(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS woocommerce_sync_state (
+            id SMALLINT PRIMARY KEY,
+            last_started_at TIMESTAMPTZ,
+            last_finished_at TIMESTAMPTZ,
+            last_success_at TIMESTAMPTZ,
+            last_error TEXT,
+            last_received INTEGER NOT NULL DEFAULT 0,
+            last_created INTEGER NOT NULL DEFAULT 0,
+            last_updated INTEGER NOT NULL DEFAULT 0,
+            is_running BOOLEAN NOT NULL DEFAULT FALSE,
+            trigger TEXT
+        )
+        """
+    )
 
-            for woo_order in woo_orders:
-                woo_id = int(woo_order["id"])
-                woo_number = str(
-                    woo_order.get("number") or woo_id
-                ).strip()
-                woo_status = str(
-                    woo_order.get("status") or ""
-                ).strip()
+    cur.execute(
+        """
+        INSERT INTO woocommerce_sync_state (id)
+        VALUES (1)
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
 
-                client_name = _wc_customer_name(woo_order)
-                order_name = _wc_order_name(woo_order)
-                quantity = _wc_quantity(woo_order)
 
-                price = Decimal(
-                    str(woo_order.get("total") or "0")
-                )
-
-                paid_amount, payment_status = _wc_payment(
-                    woo_order
-                )
-
-                production_status = _WC_STATUS_MAP.get(
-                    woo_status,
-                    "Nowe",
-                )
-
-                notes = _wc_notes(woo_order)
+def _record_wc_sync_failure(error: str, trigger: str) -> None:
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                _ensure_wc_sync_schema(cur)
 
                 cur.execute(
                     """
-                    SELECT id
-                    FROM orders
-                    WHERE woocommerce_order_id = %s
+                    UPDATE woocommerce_sync_state
+                    SET
+                        last_finished_at = NOW(),
+                        last_error = %s,
+                        is_running = FALSE,
+                        trigger = %s
+                    WHERE id = 1
                     """,
-                    (woo_id,),
+                    (error[:2000], trigger),
                 )
 
-                existing = cur.fetchone()
+            conn.commit()
+    except Exception:
+        pass
 
-                if existing:
+
+def _wc_sync_once(limit: int = 100, trigger: str = "manual") -> dict:
+    if not _WC_SYNC_LOCK.acquire(blocking=False):
+        return {
+            "received": 0,
+            "created": 0,
+            "updated": 0,
+            "imported_numbers": [],
+            "skipped": True,
+            "message": "Synchronizacja już trwa",
+        }
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                _ensure_woocommerce_schema(cur)
+                _ensure_wc_sync_schema(cur)
+
+                cur.execute(
+                    """
+                    UPDATE woocommerce_sync_state
+                    SET
+                        last_started_at = NOW(),
+                        last_error = NULL,
+                        is_running = TRUE,
+                        trigger = %s
+                    WHERE id = 1
+                    """,
+                    (trigger,),
+                )
+
+            conn.commit()
+
+        woo_orders = _wc_fetch_orders(limit)
+
+        created = 0
+        updated = 0
+        imported_numbers: list[str] = []
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                _ensure_woocommerce_schema(cur)
+                _ensure_wc_sync_schema(cur)
+
+                for woo_order in woo_orders:
+                    woo_id = int(woo_order["id"])
+                    woo_number = str(
+                        woo_order.get("number") or woo_id
+                    ).strip()
+                    woo_status = str(
+                        woo_order.get("status") or ""
+                    ).strip()
+
+                    client_name = _wc_customer_name(woo_order)
+                    order_name = _wc_order_name(woo_order)
+                    quantity = _wc_quantity(woo_order)
+
+                    price = Decimal(
+                        str(woo_order.get("total") or "0")
+                    )
+
+                    paid_amount, payment_status = _wc_payment(
+                        woo_order
+                    )
+
+                    production_status = _WC_STATUS_MAP.get(
+                        woo_status,
+                        "Nowe",
+                    )
+
+                    notes = _wc_notes(woo_order)
+
                     cur.execute(
                         """
-                        UPDATE orders
-                        SET
-                            client_name = %s,
-                            name = %s,
-                            source = 'WooCommerce',
-                            quantity = %s,
-                            price = %s,
-                            paid_amount = %s,
-                            payment_status = %s,
-                            woocommerce_order_number = %s,
-                            woocommerce_status = %s,
-                            woocommerce_synced_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = %s
+                        SELECT id
+                        FROM orders
+                        WHERE woocommerce_order_id = %s
+                        """,
+                        (woo_id,),
+                    )
+
+                    existing = cur.fetchone()
+
+                    if existing:
+                        cur.execute(
+                            """
+                            UPDATE orders
+                            SET
+                                client_name = %s,
+                                name = %s,
+                                source = 'WooCommerce',
+                                quantity = %s,
+                                price = %s,
+                                paid_amount = %s,
+                                payment_status = %s,
+                                woocommerce_order_number = %s,
+                                woocommerce_status = %s,
+                                woocommerce_synced_at = NOW(),
+                                updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (
+                                client_name,
+                                order_name,
+                                quantity,
+                                price,
+                                paid_amount,
+                                payment_status,
+                                woo_number,
+                                woo_status,
+                                existing["id"],
+                            ),
+                        )
+
+                        updated += 1
+                        continue
+
+                    cur.execute(
+                        """
+                        INSERT INTO orders (
+                            client_name,
+                            name,
+                            source,
+                            size,
+                            quantity,
+                            price,
+                            paid_amount,
+                            payment_status,
+                            deadline,
+                            notes,
+                            status,
+                            woocommerce_order_id,
+                            woocommerce_order_number,
+                            woocommerce_status,
+                            woocommerce_synced_at
+                        )
+                        VALUES (
+                            %s,
+                            %s,
+                            'WooCommerce',
+                            NULL,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            NULL,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            NOW()
+                        )
+                        RETURNING id
                         """,
                         (
                             client_name,
@@ -902,90 +1042,163 @@ def import_woocommerce_orders(
                             price,
                             paid_amount,
                             payment_status,
+                            notes,
+                            production_status,
+                            woo_id,
                             woo_number,
                             woo_status,
-                            existing["id"],
                         ),
                     )
 
-                    updated += 1
-                    continue
+                    order_id = cur.fetchone()["id"]
+                    order_number = f"YK-{order_id:05d}"
+
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET
+                            order_number = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (order_number, order_id),
+                    )
+
+                    created += 1
+                    imported_numbers.append(order_number)
 
                 cur.execute(
                     """
-                    INSERT INTO orders (
-                        client_name,
-                        name,
-                        source,
-                        size,
-                        quantity,
-                        price,
-                        paid_amount,
-                        payment_status,
-                        deadline,
-                        notes,
-                        status,
-                        woocommerce_order_id,
-                        woocommerce_order_number,
-                        woocommerce_status,
-                        woocommerce_synced_at
-                    )
-                    VALUES (
-                        %s,
-                        %s,
-                        'WooCommerce',
-                        NULL,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        NULL,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        NOW()
-                    )
-                    RETURNING id
+                    UPDATE woocommerce_sync_state
+                    SET
+                        last_finished_at = NOW(),
+                        last_success_at = NOW(),
+                        last_error = NULL,
+                        last_received = %s,
+                        last_created = %s,
+                        last_updated = %s,
+                        is_running = FALSE,
+                        trigger = %s
+                    WHERE id = 1
                     """,
                     (
-                        client_name,
-                        order_name,
-                        quantity,
-                        price,
-                        paid_amount,
-                        payment_status,
-                        notes,
-                        production_status,
-                        woo_id,
-                        woo_number,
-                        woo_status,
+                        len(woo_orders),
+                        created,
+                        updated,
+                        trigger,
                     ),
                 )
 
-                order_id = cur.fetchone()["id"]
-                order_number = f"YK-{order_id:05d}"
+            conn.commit()
 
-                cur.execute(
-                    """
-                    UPDATE orders
-                    SET
-                        order_number = %s,
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (order_number, order_id),
-                )
+        return {
+            "received": len(woo_orders),
+            "created": created,
+            "updated": updated,
+            "imported_numbers": imported_numbers[:20],
+            "skipped": False,
+        }
 
-                created += 1
-                imported_numbers.append(order_number)
+    except Exception as exc:
+        _record_wc_sync_failure(str(exc), trigger)
+        raise
+
+    finally:
+        _WC_SYNC_LOCK.release()
+
+
+def _wc_auto_sync_worker() -> None:
+    while True:
+        try:
+            _wc_sync_once(
+                limit=100,
+                trigger="automatic",
+            )
+        except Exception as exc:
+            print(
+                f"WooCommerce auto-sync error: {exc}",
+                flush=True,
+            )
+
+        _wc_time.sleep(_WC_SYNC_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+def start_wc_auto_sync_worker():
+    global _WC_SYNC_WORKER_STARTED
+
+    configured = all(
+        [
+            os.environ.get("WC_URL", "").strip(),
+            os.environ.get("WC_CONSUMER_KEY", "").strip(),
+            os.environ.get("WC_CONSUMER_SECRET", "").strip(),
+        ]
+    )
+
+    if not configured or _WC_SYNC_WORKER_STARTED:
+        return
+
+    _WC_SYNC_WORKER_STARTED = True
+
+    worker = _wc_threading.Thread(
+        target=_wc_auto_sync_worker,
+        name="woocommerce-auto-sync",
+        daemon=True,
+    )
+
+    worker.start()
+
+
+@app.get("/woocommerce/sync-status")
+def woocommerce_sync_status(
+    user: dict = Depends(get_current_user),
+):
+    configured = all(
+        [
+            os.environ.get("WC_URL", "").strip(),
+            os.environ.get("WC_CONSUMER_KEY", "").strip(),
+            os.environ.get("WC_CONSUMER_SECRET", "").strip(),
+        ]
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_wc_sync_schema(cur)
+
+            cur.execute(
+                """
+                SELECT
+                    last_started_at,
+                    last_finished_at,
+                    last_success_at,
+                    last_error,
+                    last_received,
+                    last_created,
+                    last_updated,
+                    is_running,
+                    trigger
+                FROM woocommerce_sync_state
+                WHERE id = 1
+                """
+            )
+
+            state = cur.fetchone()
 
         conn.commit()
 
     return {
-        "received": len(woo_orders),
-        "created": created,
-        "updated": updated,
-        "imported_numbers": imported_numbers[:20],
+        "configured": configured,
+        "interval_minutes": 10,
+        **state,
     }
+
+
+@app.post("/woocommerce/import")
+def import_woocommerce_orders(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: dict = Depends(get_current_user),
+):
+    return _wc_sync_once(
+        limit=limit,
+        trigger="manual",
+    )
