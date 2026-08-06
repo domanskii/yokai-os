@@ -39,14 +39,8 @@ import {
 type OrderStatus =
   | "Nowe"
   | "Projekt"
-  | "Akceptacja"
-  | "Do cięcia"
-  | "Wycinanie"
-  | "Wybieranie"
-  | "Warstwowanie"
-  | "Transfer"
-  | "Pakowanie"
-  | "Wysyłka"
+  | "Produkcja"
+  | "Gotowe"
   | "Zrealizowane"
   | "Anulowane";
 
@@ -101,65 +95,23 @@ const columns: ProductionColumn[] = [
   {
     status: "Projekt",
     label: "Projekt",
-    hint: "Przygotowanie grafiki",
+    hint: "Projekt i akceptacja",
     accent: "border-violet-400/20",
     dot: "bg-violet-400",
   },
   {
-    status: "Akceptacja",
-    label: "Akceptacja",
-    hint: "Czeka na klienta",
-    accent: "border-indigo-400/20",
-    dot: "bg-indigo-400",
-  },
-  {
-    status: "Do cięcia",
-    label: "Do cięcia",
-    hint: "Kolejka plotera",
+    status: "Produkcja",
+    label: "Produkcja",
+    hint: "Realizacja na warsztacie",
     accent: "border-cyan-400/20",
     dot: "bg-cyan-400",
   },
   {
-    status: "Wycinanie",
-    label: "Wycinanie",
-    hint: "Na ploterze",
-    accent: "border-blue-400/20",
-    dot: "bg-blue-400",
-  },
-  {
-    status: "Wybieranie",
-    label: "Wybieranie",
-    hint: "Usuwanie folii",
-    accent: "border-teal-400/20",
-    dot: "bg-teal-400",
-  },
-  {
-    status: "Warstwowanie",
-    label: "Warstwowanie",
-    hint: "Łączenie kolorów",
-    accent: "border-fuchsia-400/20",
-    dot: "bg-fuchsia-400",
-  },
-  {
-    status: "Transfer",
-    label: "Transfer",
-    hint: "Folia transportowa",
-    accent: "border-purple-400/20",
-    dot: "bg-purple-400",
-  },
-  {
-    status: "Pakowanie",
-    label: "Pakowanie",
-    hint: "Gotowe do paczki",
+    status: "Gotowe",
+    label: "Gotowe",
+    hint: "Pakowanie, odbiór lub wysyłka",
     accent: "border-amber-400/20",
     dot: "bg-amber-400",
-  },
-  {
-    status: "Wysyłka",
-    label: "Wysyłka",
-    hint: "Do nadania",
-    accent: "border-emerald-400/20",
-    dot: "bg-emerald-400",
   },
   {
     status: "Zrealizowane",
@@ -1163,8 +1115,8 @@ export default function ProductionPage() {
             />
           </label>
 
-          <section className="mt-5 overflow-x-auto pb-6">
-            <div className="flex min-w-max gap-4">
+          <section className="mt-5 pb-6">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
               {columns.map((column) => {
                 const columnOrders =
                   visibleOrders.filter(
@@ -1195,7 +1147,7 @@ export default function ProductionPage() {
                         column.status
                       )
                     }
-                    className={`flex w-[294px] flex-none flex-col rounded-3xl border bg-[#0d1117]/90 p-3 transition ${
+                    className={`flex min-w-0 flex-col rounded-3xl border bg-[#0d1117]/90 p-3 transition ${
                       isTarget
                         ? "border-violet-400/55 bg-violet-400/[.055] shadow-[0_0_35px_rgba(139,92,246,.12)]"
                         : column.accent
@@ -1222,7 +1174,7 @@ export default function ProductionPage() {
                       </span>
                     </header>
 
-                    <div className="min-h-[460px] space-y-3 rounded-2xl">
+                    <div className="min-h-[360px] space-y-3 rounded-2xl">
                       {loading ? (
                         <div className="grid min-h-[220px] place-items-center">
                           <LoaderCircle className="size-5 animate-spin text-white/25" />

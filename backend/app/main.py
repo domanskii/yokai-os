@@ -18,14 +18,8 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 OrderStatus = Literal[
     "Nowe",
     "Projekt",
-    "Akceptacja",
-    "Do cięcia",
-    "Wycinanie",
-    "Wybieranie",
-    "Warstwowanie",
-    "Transfer",
-    "Pakowanie",
-    "Wysyłka",
+    "Produkcja",
+    "Gotowe",
     "Zrealizowane",
     "Anulowane",
 ]
@@ -37,7 +31,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.6.0")
+app = FastAPI(title="YOKAI OS API", version="0.7.0")
 
 
 class LoginRequest(BaseModel):
@@ -205,6 +199,41 @@ def startup():
                 """
             )
 
+
+            cur.execute(
+                """
+                UPDATE orders
+                SET status = CASE
+                    WHEN status = 'Akceptacja'
+                        THEN 'Projekt'
+                    WHEN status IN (
+                        'Do cięcia',
+                        'Wycinanie',
+                        'Wybieranie',
+                        'Warstwowanie',
+                        'Transfer'
+                    )
+                        THEN 'Produkcja'
+                    WHEN status IN (
+                        'Pakowanie',
+                        'Wysyłka'
+                    )
+                        THEN 'Gotowe'
+                    ELSE status
+                END
+                WHERE status IN (
+                    'Akceptacja',
+                    'Do cięcia',
+                    'Wycinanie',
+                    'Wybieranie',
+                    'Warstwowanie',
+                    'Transfer',
+                    'Pakowanie',
+                    'Wysyłka'
+                )
+                """
+            )
+
             cur.execute("SELECT id FROM users WHERE email = %s", (ADMIN_EMAIL,))
             if cur.fetchone() is None:
                 password_hash = bcrypt.hashpw(
@@ -227,7 +256,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.6.0",
+        "version": "0.7.0",
         "status": "running",
     }
 
@@ -291,11 +320,11 @@ def order_stats(user: dict = Depends(get_current_user)):
                     COUNT(*) FILTER (WHERE is_archived = FALSE) AS active,
                     COUNT(*) FILTER (
                         WHERE is_archived = FALSE
-                        AND status IN ('Do cięcia', 'Wycinanie')
+                        AND status = 'Produkcja'
                     ) AS cutting,
                     COUNT(*) FILTER (
                         WHERE is_archived = FALSE
-                        AND status = 'Wysyłka'
+                        AND status = 'Gotowe'
                     ) AS shipping,
                     COUNT(*) FILTER (
                         WHERE is_archived = FALSE
@@ -589,8 +618,8 @@ import time as _wc_time
 
 _WC_STATUS_MAP = {
     "pending": "Nowe",
-    "on-hold": "Akceptacja",
-    "processing": "Do cięcia",
+    "on-hold": "Projekt",
+    "processing": "Produkcja",
     "completed": "Zrealizowane",
     "cancelled": "Anulowane",
     "refunded": "Anulowane",
@@ -641,7 +670,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.6",
+                "User-Agent": "YOKAI-OS/0.7",
             },
             method="GET",
         )
