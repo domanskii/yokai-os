@@ -106,6 +106,7 @@ export default function CalculatorPage() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [creatingOrder, setCreatingOrder] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
   const [message, setMessage] = useState("");
@@ -493,6 +494,99 @@ export default function CalculatorPage() {
       );
     } finally {
       setSaving(false);
+    }
+  };
+
+
+  const createOrderFromCalculator = async () => {
+    if (orderId) {
+      router.push(`/orders?edit=${orderId}`);
+      return;
+    }
+
+    if (editingId !== null) {
+      notify(
+        "Zakończ lub cofnij edycję zapisanej kalkulacji"
+      );
+      return;
+    }
+
+    const validLines = lines.filter(
+      (line) =>
+        line.material_id &&
+        parseNumber(line.layers) > 0
+    );
+
+    if (validLines.length === 0) {
+      notify("Dodaj przynajmniej jeden materiał");
+      return;
+    }
+
+    if (deductStock && result.insufficient) {
+      notify("Za mało materiału na stanie");
+      return;
+    }
+
+    setCreatingOrder(true);
+
+    try {
+      const response = await api(
+        "/api/calculations/actions/create-order",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            order_id: null,
+            name:
+              name.trim() ||
+              "Kalkulacja naklejki",
+            width_cm: parseNumber(width),
+            height_cm: parseNumber(height),
+            quantity: Math.max(
+              1,
+              Math.round(parseNumber(quantity))
+            ),
+            waste_percent: parseNumber(waste),
+            labor_minutes:
+              parseNumber(laborMinutes),
+            hourly_rate: parseNumber(hourlyRate),
+            margin_percent: parseNumber(margin),
+            materials: validLines.map((line) => ({
+              material_id: Number(line.material_id),
+              layers: parseNumber(line.layers),
+            })),
+            deduct_stock: deductStock,
+            update_order_price: false,
+            notes: notes.trim() || null,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Nie udało się utworzyć zamówienia"
+        );
+      }
+
+      notify(`Utworzono ${data.order.order_number}`);
+
+      router.push(
+        `/orders?edit=${data.order.id}`
+      );
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Nie udało się utworzyć zamówienia"
+      );
+    } finally {
+      setCreatingOrder(false);
     }
   };
 
@@ -917,17 +1011,32 @@ export default function CalculatorPage() {
                   </div>
                 )}
 
+                {editingId === null && (
+                  <button
+                    onClick={createOrderFromCalculator}
+                    disabled={saving || creatingOrder}
+                    className="secondary-button mt-5 w-full justify-center border-emerald-400/25 bg-emerald-400/[.06] text-emerald-200 hover:bg-emerald-400/[.1] disabled:opacity-60"
+                  >
+                    <ShoppingBag className="size-4" />
+                    {orderId
+                      ? "Otwórz przypisane zamówienie"
+                      : creatingOrder
+                        ? "Tworzenie zamówienia..."
+                        : "Utwórz zamówienie"}
+                  </button>
+                )}
+
                 <button
                   onClick={save}
-                  disabled={saving}
-                  className="primary-button mt-5 w-full justify-center"
+                  disabled={saving || creatingOrder}
+                  className="primary-button mt-3 w-full justify-center"
                 >
                   <Save className="size-4" />
                   {saving
                     ? "Zapisywanie..."
                     : editingId !== null
                       ? "Zapisz zmiany"
-                      : "Zapisz kalkulację"}
+                      : "Zapisz samą kalkulację"}
                 </button>
               </section>
             </aside>

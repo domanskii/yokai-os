@@ -781,6 +781,41 @@ export default function OrdersPage() {
     return () => window.clearInterval(timer);
   }, [token]);
 
+
+  useEffect(() => {
+    if (!token || orders.length === 0) {
+      return;
+    }
+
+    const query = new URLSearchParams(
+      window.location.search
+    );
+
+    const editOrderId = Number(
+      query.get("edit") || 0
+    );
+
+    if (!editOrderId) {
+      return;
+    }
+
+    const targetOrder = orders.find(
+      (order) => order.id === editOrderId
+    );
+
+    if (!targetOrder) {
+      return;
+    }
+
+    setSelected(targetOrder);
+
+    window.history.replaceState(
+      {},
+      "",
+      "/orders"
+    );
+  }, [token, orders]);
+
   const filteredValue = useMemo(
     () => orders.reduce((sum, order) => sum + Number(order.price), 0),
     [orders]
