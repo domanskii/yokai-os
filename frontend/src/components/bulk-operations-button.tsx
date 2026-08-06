@@ -256,7 +256,10 @@ function BulkOperationsModal({
         new URLSearchParams({
           archived:
             String(archived),
-          limit: "1000",
+          limit:
+            entity === "orders"
+              ? "500"
+              : "1000",
         });
 
       const response =
