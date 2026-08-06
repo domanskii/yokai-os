@@ -1242,7 +1242,7 @@ export default function ProductionPage() {
             void moveOrder(selected, status)
           }
           onOpenOrders={() =>
-            router.push("/orders")
+            router.push(`/orders/${selected.id}`)
           }
         />
       )}

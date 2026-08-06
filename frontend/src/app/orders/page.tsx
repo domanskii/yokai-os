@@ -612,6 +612,19 @@ function OrderDrawer({
           </div>
         )}
 
+        <button
+          type="button"
+          onClick={() =>
+            window.location.assign(
+              `/orders/${order.id}`
+            )
+          }
+          className="secondary-button mt-6 w-full justify-center"
+        >
+          <ShoppingBag className="size-4" />
+          Otwórz pełną kartę zamówienia
+        </button>
+
         <div className="mt-7 flex flex-col-reverse justify-between gap-3 sm:flex-row">
           <button
             onClick={archive}

@@ -31,7 +31,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.7.0")
+app = FastAPI(title="YOKAI OS API", version="0.8.0")
 
 
 class LoginRequest(BaseModel):
@@ -256,7 +256,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.7.0",
+        "version": "0.8.0",
         "status": "running",
     }
 
@@ -670,7 +670,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.7",
+                "User-Agent": "YOKAI-OS/0.8",
             },
             method="GET",
         )
@@ -1231,3 +1231,356 @@ def import_woocommerce_orders(
         limit=limit,
         trigger="manual",
     )
+
+
+
+# === YOKAI WOOCOMMERCE ORDER DETAILS V0.8 ===
+
+
+def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
+    url, key, secret = _wc_configuration()
+
+    authorization = _wc_base64.b64encode(
+        f"{key}:{secret}".encode("utf-8")
+    ).decode("ascii")
+
+    endpoint = (
+        f"{url}/wp-json/wc/v3/orders/"
+        f"{woocommerce_order_id}"
+    )
+
+    request = _wc_urlrequest.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Basic {authorization}",
+            "Accept": "application/json",
+            "User-Agent": "YOKAI-OS/0.8",
+        },
+        method="GET",
+    )
+
+    try:
+        with _wc_urlrequest.urlopen(
+            request,
+            timeout=30,
+        ) as response:
+            raw = response.read().decode("utf-8")
+
+    except _wc_urlerror.HTTPError as exc:
+        raw_error = exc.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        try:
+            error_data = _wc_json.loads(raw_error)
+            message = error_data.get(
+                "message",
+                raw_error,
+            )
+        except Exception:
+            message = raw_error
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"WooCommerce HTTP {exc.code}: "
+                f"{message}"
+            ),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Nie udało się pobrać szczegółów "
+                f"z WooCommerce: {exc}"
+            ),
+        ) from exc
+
+    try:
+        data = _wc_json.loads(raw)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="WooCommerce zwrócił nieprawidłowy JSON",
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Nieprawidłowa odpowiedź WooCommerce",
+        )
+
+    return data
+
+
+def _wc_public_meta(metadata: list | None) -> list[dict]:
+    result: list[dict] = []
+
+    for item in metadata or []:
+        key = str(item.get("key") or "").strip()
+
+        if not key or key.startswith("_"):
+            continue
+
+        value = item.get("value")
+
+        result.append(
+            {
+                "id": item.get("id"),
+                "key": key,
+                "display_key": str(
+                    item.get("display_key")
+                    or key
+                ).strip(),
+                "value": value,
+                "display_value": item.get(
+                    "display_value",
+                    value,
+                ),
+            }
+        )
+
+    return result
+
+
+def _wc_public_address(address: dict | None) -> dict:
+    address = address or {}
+
+    return {
+        "first_name": str(
+            address.get("first_name") or ""
+        ).strip(),
+        "last_name": str(
+            address.get("last_name") or ""
+        ).strip(),
+        "company": str(
+            address.get("company") or ""
+        ).strip(),
+        "address_1": str(
+            address.get("address_1") or ""
+        ).strip(),
+        "address_2": str(
+            address.get("address_2") or ""
+        ).strip(),
+        "postcode": str(
+            address.get("postcode") or ""
+        ).strip(),
+        "city": str(
+            address.get("city") or ""
+        ).strip(),
+        "state": str(
+            address.get("state") or ""
+        ).strip(),
+        "country": str(
+            address.get("country") or ""
+        ).strip(),
+        "email": str(
+            address.get("email") or ""
+        ).strip(),
+        "phone": str(
+            address.get("phone") or ""
+        ).strip(),
+    }
+
+
+@app.get("/orders/{order_id}/woocommerce-details")
+def get_woocommerce_order_details(
+    order_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    order_number,
+                    source,
+                    woocommerce_order_id,
+                    woocommerce_order_number,
+                    woocommerce_status,
+                    woocommerce_synced_at
+                FROM orders
+                WHERE id = %s
+                """,
+                (order_id,),
+            )
+
+            internal_order = cur.fetchone()
+
+    if internal_order is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono zamówienia",
+        )
+
+    woocommerce_order_id = internal_order.get(
+        "woocommerce_order_id"
+    )
+
+    if not woocommerce_order_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "To zamówienie nie pochodzi "
+                "z WooCommerce"
+            ),
+        )
+
+    order = _wc_fetch_single_order(
+        int(woocommerce_order_id)
+    )
+
+    items = []
+
+    for item in order.get("line_items") or []:
+        items.append(
+            {
+                "id": item.get("id"),
+                "name": str(
+                    item.get("name") or "Produkt"
+                ).strip(),
+                "product_id": item.get("product_id"),
+                "variation_id": item.get("variation_id"),
+                "quantity": int(
+                    item.get("quantity") or 0
+                ),
+                "sku": str(
+                    item.get("sku") or ""
+                ).strip(),
+                "price": str(
+                    item.get("price") or "0"
+                ),
+                "subtotal": str(
+                    item.get("subtotal") or "0"
+                ),
+                "total": str(
+                    item.get("total") or "0"
+                ),
+                "tax": str(
+                    item.get("total_tax") or "0"
+                ),
+                "meta": _wc_public_meta(
+                    item.get("meta_data")
+                ),
+            }
+        )
+
+    shipping_methods = []
+
+    for shipping in order.get("shipping_lines") or []:
+        shipping_methods.append(
+            {
+                "id": shipping.get("id"),
+                "method_title": str(
+                    shipping.get("method_title") or ""
+                ).strip(),
+                "method_id": str(
+                    shipping.get("method_id") or ""
+                ).strip(),
+                "total": str(
+                    shipping.get("total") or "0"
+                ),
+                "meta": _wc_public_meta(
+                    shipping.get("meta_data")
+                ),
+            }
+        )
+
+    fees = []
+
+    for fee in order.get("fee_lines") or []:
+        fees.append(
+            {
+                "id": fee.get("id"),
+                "name": str(
+                    fee.get("name") or "Opłata"
+                ).strip(),
+                "total": str(
+                    fee.get("total") or "0"
+                ),
+            }
+        )
+
+    coupons = []
+
+    for coupon in order.get("coupon_lines") or []:
+        coupons.append(
+            {
+                "code": str(
+                    coupon.get("code") or ""
+                ).strip(),
+                "discount": str(
+                    coupon.get("discount") or "0"
+                ),
+            }
+        )
+
+    return {
+        "internal_order_id": internal_order["id"],
+        "internal_order_number": internal_order[
+            "order_number"
+        ],
+        "woocommerce_order_id": order.get("id"),
+        "woocommerce_order_number": str(
+            order.get("number")
+            or internal_order.get(
+                "woocommerce_order_number"
+            )
+            or ""
+        ),
+        "woocommerce_status": str(
+            order.get("status") or ""
+        ),
+        "currency": str(
+            order.get("currency") or "PLN"
+        ),
+        "total": str(
+            order.get("total") or "0"
+        ),
+        "subtotal": str(
+            order.get("subtotal") or "0"
+        ),
+        "discount_total": str(
+            order.get("discount_total") or "0"
+        ),
+        "shipping_total": str(
+            order.get("shipping_total") or "0"
+        ),
+        "total_tax": str(
+            order.get("total_tax") or "0"
+        ),
+        "date_created": order.get("date_created"),
+        "date_modified": order.get("date_modified"),
+        "date_paid": order.get("date_paid"),
+        "date_completed": order.get(
+            "date_completed"
+        ),
+        "payment_method": str(
+            order.get("payment_method") or ""
+        ),
+        "payment_method_title": str(
+            order.get("payment_method_title") or ""
+        ),
+        "transaction_id": str(
+            order.get("transaction_id") or ""
+        ),
+        "customer_note": str(
+            order.get("customer_note") or ""
+        ),
+        "billing": _wc_public_address(
+            order.get("billing")
+        ),
+        "shipping": _wc_public_address(
+            order.get("shipping")
+        ),
+        "items": items,
+        "shipping_methods": shipping_methods,
+        "fees": fees,
+        "coupons": coupons,
+        "order_meta": _wc_public_meta(
+            order.get("meta_data")
+        ),
+    }
