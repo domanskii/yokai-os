@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.36.0")
+app = FastAPI(title="YOKAI OS API", version="0.37.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.36.0",
+        "version": "0.37.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.36",
+                "User-Agent": "YOKAI-OS/0.37",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.36",
+            "User-Agent": "YOKAI-OS/0.37",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.36",
+            "User-Agent": "YOKAI-OS/0.37",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.36",
+            "User-Agent": "YOKAI-OS/0.37",
         },
     )
 
@@ -11225,7 +11225,7 @@ def _woo_api(path: str, params: dict | None = None):
         headers={
             "Authorization": f"Basic {token}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.36",
+            "User-Agent": "YOKAI-OS/0.37",
         },
         method="GET",
     )
@@ -12486,7 +12486,7 @@ def _ai_http_json(endpoint, payload):
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.36",
+            "User-Agent": "YOKAI-OS/0.37",
         },
         method="POST",
     )
@@ -12561,7 +12561,7 @@ def _ai_generate(prompt, refs, quality, size):
             "Authorization": f"Bearer {key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.36",
+            "User-Agent": "YOKAI-OS/0.37",
         },
         method="POST",
     )

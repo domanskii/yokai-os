@@ -102,6 +102,7 @@ echo
 echo "===== FRONTEND ====="
 
 check_page "Dashboard" "/"
+check_page "Mobile PWA" "/mobile"
 check_page "Produkcja" "/production"
 check_page "Produkcja PRO" "/production-pro"
 check_page "Zamówienia" "/orders"
