@@ -1,5 +1,7 @@
 "use client";
 
+import { OrderWorkflow } from "../../../components/order-workflow";
+
 import { OrderOperationsFinance } from "../../../components/order-operations-finance";
 
 import { OrderInstructionPdfs } from "../../../components/order-instruction-pdfs";
@@ -549,6 +551,10 @@ export default function OrderDetailsPage() {
             />
 
             <OrderOperationsFinance
+              orderId={order.id}
+            />
+
+            <OrderWorkflow
               orderId={order.id}
             />
 

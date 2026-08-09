@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.22.0")
+app = FastAPI(title="YOKAI OS API", version="0.23.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.22.0",
+        "version": "0.23.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.22",
+                "User-Agent": "YOKAI-OS/0.23",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.22",
+            "User-Agent": "YOKAI-OS/0.23",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.22",
+            "User-Agent": "YOKAI-OS/0.23",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.22",
+            "User-Agent": "YOKAI-OS/0.23",
         },
     )
 
@@ -8311,3 +8311,1357 @@ def get_finance_dashboard(
             "Nie uwzględnia podatków."
         ),
     }
+
+# === YOKAI ORDER WORKFLOW V0.23 ===
+
+import uuid as _workflow_uuid
+
+
+class OrderFulfillmentUpdate(BaseModel):
+    fulfillment_method: str = Field(
+        default="none",
+        min_length=1,
+        max_length=20,
+    )
+    fulfillment_status: str = Field(
+        default="pending",
+        min_length=1,
+        max_length=20,
+    )
+
+
+class OrderInternalNoteCreate(BaseModel):
+    content: str = Field(
+        min_length=1,
+        max_length=6000,
+    )
+
+
+class OrderChecklistCreate(BaseModel):
+    title: str = Field(
+        min_length=1,
+        max_length=180,
+    )
+
+
+class OrderChecklistUpdate(BaseModel):
+    is_done: bool
+
+
+_WORKFLOW_METHODS = {
+    "none",
+    "shipping",
+    "pickup",
+}
+
+_WORKFLOW_STATUSES = {
+    "pending",
+    "ready",
+    "completed",
+}
+
+_WORKFLOW_DEFAULT_CHECKLIST = [
+    "Projekt zweryfikowany",
+    "Materiał przygotowany",
+    "Wycięte",
+    "Wybrane",
+    "Nałożony transfer",
+    "Kontrola jakości",
+    "Zapakowane",
+]
+
+
+def _workflow_actor(
+    user: dict,
+) -> str:
+    for key in (
+        "email",
+        "username",
+        "sub",
+    ):
+        value = user.get(
+            key
+        )
+
+        if value:
+            return str(value)
+
+    return "YOKAI OS"
+
+
+def _workflow_add_activity(
+    cur,
+    order_id: int,
+    event_type: str,
+    title: str,
+    details: str | None = None,
+    actor: str | None = None,
+    changes: dict | None = None,
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO order_activity (
+            order_id,
+            event_type,
+            title,
+            details,
+            actor,
+            changes
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s
+        )
+        """,
+        (
+            order_id,
+            event_type,
+            title,
+            details,
+            actor,
+            Jsonb(
+                changes or {}
+            ),
+        ),
+    )
+
+
+def _ensure_workflow_schema(
+    cur,
+) -> None:
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS
+            fulfillment_method TEXT
+            NOT NULL
+            DEFAULT 'none'
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS
+            fulfillment_status TEXT
+            NOT NULL
+            DEFAULT 'pending'
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS
+            checklist_initialized BOOLEAN
+            NOT NULL
+            DEFAULT FALSE
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET fulfillment_method = 'none'
+        WHERE
+            fulfillment_method IS NULL
+            OR fulfillment_method NOT IN (
+                'none',
+                'shipping',
+                'pickup'
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET fulfillment_status = 'pending'
+        WHERE
+            fulfillment_status IS NULL
+            OR fulfillment_status NOT IN (
+                'pending',
+                'ready',
+                'completed'
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS
+            order_internal_notes (
+                id BIGSERIAL PRIMARY KEY,
+                order_id BIGINT NOT NULL
+                    REFERENCES orders(id)
+                    ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                author TEXT,
+                created_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW(),
+                updated_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW()
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            order_internal_notes_order_index
+        ON order_internal_notes (
+            order_id,
+            created_at DESC
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS
+            order_checklist_items (
+                id BIGSERIAL PRIMARY KEY,
+                order_id BIGINT NOT NULL
+                    REFERENCES orders(id)
+                    ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                is_done BOOLEAN NOT NULL
+                    DEFAULT FALSE,
+                sort_order INTEGER NOT NULL
+                    DEFAULT 0,
+                created_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW(),
+                updated_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW()
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            order_checklist_items_order_index
+        ON order_checklist_items (
+            order_id,
+            sort_order,
+            id
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS
+            order_activity (
+                id BIGSERIAL PRIMARY KEY,
+                order_id BIGINT NOT NULL
+                    REFERENCES orders(id)
+                    ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                details TEXT,
+                actor TEXT,
+                changes JSONB NOT NULL
+                    DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW()
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            order_activity_order_index
+        ON order_activity (
+            order_id,
+            created_at DESC,
+            id DESC
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION
+            yokai_log_order_update()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            old_row JSONB;
+            new_row JSONB;
+            field_name TEXT;
+            changed JSONB := '{}'::JSONB;
+        BEGIN
+            old_row := to_jsonb(OLD);
+            new_row := to_jsonb(NEW);
+
+            FOREACH field_name IN ARRAY ARRAY[
+                'client_name',
+                'name',
+                'dimension',
+                'dimensions',
+                'quantity',
+                'price',
+                'paid_amount',
+                'payment_status',
+                'status',
+                'deadline',
+                'priority',
+                'production_bucket',
+                'fulfillment_method',
+                'fulfillment_status',
+                'is_archived'
+            ]
+            LOOP
+                IF (
+                    old_row -> field_name
+                ) IS DISTINCT FROM (
+                    new_row -> field_name
+                )
+                THEN
+                    changed := changed
+                        || jsonb_build_object(
+                            field_name,
+                            jsonb_build_object(
+                                'old',
+                                old_row -> field_name,
+                                'new',
+                                new_row -> field_name
+                            )
+                        );
+                END IF;
+            END LOOP;
+
+            IF changed <> '{}'::JSONB
+            THEN
+                INSERT INTO order_activity (
+                    order_id,
+                    event_type,
+                    title,
+                    details,
+                    actor,
+                    changes
+                )
+                VALUES (
+                    NEW.id,
+                    'order_updated',
+                    'Zmieniono zamówienie',
+                    NULL,
+                    'System',
+                    changed
+                );
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+
+    cur.execute(
+        """
+        DROP TRIGGER IF EXISTS
+            orders_activity_update
+        ON orders
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TRIGGER
+            orders_activity_update
+        AFTER UPDATE ON orders
+        FOR EACH ROW
+        EXECUTE FUNCTION
+            yokai_log_order_update()
+        """
+    )
+
+
+def _workflow_initialize_checklist(
+    cur,
+    order_id: int,
+) -> None:
+    cur.execute(
+        """
+        SELECT
+            checklist_initialized
+        FROM orders
+        WHERE id = %s
+        FOR UPDATE
+        """,
+        (order_id,),
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Nie znaleziono zamówienia"
+            ),
+        )
+
+    if row.get(
+        "checklist_initialized"
+    ):
+        return
+
+    for index, title in enumerate(
+        _WORKFLOW_DEFAULT_CHECKLIST,
+        start=10,
+    ):
+        cur.execute(
+            """
+            INSERT INTO
+                order_checklist_items (
+                    order_id,
+                    title,
+                    sort_order
+                )
+            VALUES (
+                %s, %s, %s
+            )
+            """,
+            (
+                order_id,
+                title,
+                index * 10,
+            ),
+        )
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET
+            checklist_initialized = TRUE,
+            updated_at = NOW()
+        WHERE id = %s
+        """,
+        (order_id,),
+    )
+
+
+@app.on_event("startup")
+def startup_order_workflow():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+        conn.commit()
+
+
+@app.get(
+    "/orders/{order_id}/workflow"
+)
+def get_order_workflow(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    order_number,
+                    client_name,
+                    name,
+                    status,
+                    fulfillment_method,
+                    fulfillment_status
+                FROM orders
+                WHERE id = %s
+                """,
+                (order_id,),
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono zamówienia"
+                    ),
+                )
+
+        conn.commit()
+
+    return dict(
+        row
+    )
+
+
+@app.patch(
+    "/orders/{order_id}/fulfillment"
+)
+def update_order_fulfillment(
+    order_id: int,
+    data: OrderFulfillmentUpdate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    method = (
+        data.fulfillment_method
+        .strip()
+        .lower()
+    )
+
+    fulfillment_status = (
+        data.fulfillment_status
+        .strip()
+        .lower()
+    )
+
+    if method not in (
+        _WORKFLOW_METHODS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieprawidłowy sposób przekazania"
+            ),
+        )
+
+    if fulfillment_status not in (
+        _WORKFLOW_STATUSES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieprawidłowy status wydania"
+            ),
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                UPDATE orders
+                SET
+                    fulfillment_method = %s,
+                    fulfillment_status = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING
+                    id,
+                    order_number,
+                    client_name,
+                    name,
+                    status,
+                    fulfillment_method,
+                    fulfillment_status
+                """,
+                (
+                    method,
+                    fulfillment_status,
+                    order_id,
+                ),
+            )
+
+            result = dict(
+                cur.fetchone()
+            )
+
+        conn.commit()
+
+    return result
+
+
+@app.post(
+    "/orders/{order_id}/duplicate",
+    status_code=status.HTTP_201_CREATED,
+)
+def duplicate_order(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM orders
+                WHERE id = %s
+                FOR SHARE
+                """,
+                (order_id,),
+            )
+
+            source = cur.fetchone()
+
+            if source is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono zamówienia"
+                    ),
+                )
+
+            copy_fields = [
+                "client_id",
+                "client_name",
+                "name",
+                "dimension",
+                "dimensions",
+                "quantity",
+                "price",
+                "notes",
+            ]
+
+            values = {}
+
+            for field_name in copy_fields:
+                if field_name in source:
+                    values[
+                        field_name
+                    ] = source.get(
+                        field_name
+                    )
+
+            overrides = {
+                "source":
+                    "Ponowienie",
+                "paid_amount":
+                    0,
+                "payment_status":
+                    "Nieopłacone",
+                "status":
+                    "Nowe",
+                "deadline":
+                    None,
+                "priority":
+                    "normal",
+                "production_bucket":
+                    "later",
+                "fulfillment_method":
+                    "none",
+                "fulfillment_status":
+                    "pending",
+                "checklist_initialized":
+                    False,
+                "is_archived":
+                    False,
+            }
+
+            for (
+                field_name,
+                value,
+            ) in overrides.items():
+                if field_name in source:
+                    values[
+                        field_name
+                    ] = value
+
+            if (
+                "order_number"
+                in source
+            ):
+                values[
+                    "order_number"
+                ] = (
+                    "TEMP-"
+                    + _workflow_uuid
+                    .uuid4()
+                    .hex[:12]
+                )
+
+            if not values:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Nie udało się przygotować kopii zamówienia"
+                    ),
+                )
+
+            columns = list(
+                values.keys()
+            )
+
+            placeholders = ", ".join(
+                ["%s"] * len(
+                    columns
+                )
+            )
+
+            column_sql = ", ".join(
+                columns
+            )
+
+            cur.execute(
+                f"""
+                INSERT INTO orders (
+                    {column_sql}
+                )
+                VALUES (
+                    {placeholders}
+                )
+                RETURNING id
+                """,
+                tuple(
+                    values[
+                        column
+                    ]
+                    for column
+                    in columns
+                ),
+            )
+
+            created_id = int(
+                cur.fetchone()[
+                    "id"
+                ]
+            )
+
+            if (
+                "order_number"
+                in source
+            ):
+                new_number = (
+                    f"YK-{created_id:05d}"
+                )
+
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        order_number = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        new_number,
+                        created_id,
+                    ),
+                )
+
+            _workflow_add_activity(
+                cur,
+                order_id,
+                "duplicated",
+                "Utworzono ponowne zamówienie",
+                (
+                    f"Nowe zamówienie: "
+                    f"YK-{created_id:05d}"
+                ),
+                _workflow_actor(
+                    user
+                ),
+            )
+
+            _workflow_add_activity(
+                cur,
+                created_id,
+                "duplicate_created",
+                "Zamówienie utworzone jako kopia",
+                (
+                    f"Źródło: "
+                    f"{source.get('order_number') or order_id}"
+                ),
+                _workflow_actor(
+                    user
+                ),
+            )
+
+            result = (
+                get_order_or_404(
+                    cur,
+                    created_id,
+                )
+            )
+
+        conn.commit()
+
+    return result
+
+
+@app.get(
+    "/orders/{order_id}/internal-notes"
+)
+def get_order_internal_notes(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_internal_notes
+                WHERE order_id = %s
+                ORDER BY
+                    created_at DESC,
+                    id DESC
+                """,
+                (order_id,),
+            )
+
+            rows = cur.fetchall()
+
+        conn.commit()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+@app.post(
+    "/orders/{order_id}/internal-notes",
+    status_code=status.HTTP_201_CREATED,
+)
+def add_order_internal_note(
+    order_id: int,
+    data: OrderInternalNoteCreate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    content = (
+        data.content.strip()
+    )
+
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Notatka jest pusta"
+            ),
+        )
+
+    actor = _workflow_actor(
+        user
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                INSERT INTO
+                    order_internal_notes (
+                        order_id,
+                        content,
+                        author
+                    )
+                VALUES (
+                    %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    order_id,
+                    content,
+                    actor,
+                ),
+            )
+
+            created = dict(
+                cur.fetchone()
+            )
+
+            _workflow_add_activity(
+                cur,
+                order_id,
+                "note_added",
+                "Dodano notatkę wewnętrzną",
+                (
+                    content[:160]
+                    + (
+                        "…"
+                        if len(
+                            content
+                        ) > 160
+                        else ""
+                    )
+                ),
+                actor,
+            )
+
+        conn.commit()
+
+    return created
+
+
+@app.delete(
+    "/order-internal-notes/{note_id}"
+)
+def delete_order_internal_note(
+    note_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    actor = _workflow_actor(
+        user
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_internal_notes
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (note_id,),
+            )
+
+            note = cur.fetchone()
+
+            if note is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono notatki"
+                    ),
+                )
+
+            order_id = int(
+                note["order_id"]
+            )
+
+            cur.execute(
+                """
+                DELETE FROM
+                    order_internal_notes
+                WHERE id = %s
+                """,
+                (note_id,),
+            )
+
+            _workflow_add_activity(
+                cur,
+                order_id,
+                "note_deleted",
+                "Usunięto notatkę wewnętrzną",
+                None,
+                actor,
+            )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+    }
+
+
+@app.get(
+    "/orders/{order_id}/checklist"
+)
+def get_order_checklist(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            _workflow_initialize_checklist(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_checklist_items
+                WHERE order_id = %s
+                ORDER BY
+                    sort_order,
+                    id
+                """,
+                (order_id,),
+            )
+
+            rows = cur.fetchall()
+
+        conn.commit()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+@app.post(
+    "/orders/{order_id}/checklist",
+    status_code=status.HTTP_201_CREATED,
+)
+def add_order_checklist_item(
+    order_id: int,
+    data: OrderChecklistCreate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    title = (
+        data.title.strip()
+    )
+
+    if not title:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nazwa zadania jest pusta"
+            ),
+        )
+
+    actor = _workflow_actor(
+        user
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            _workflow_initialize_checklist(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        MAX(sort_order),
+                        0
+                    ) + 10 AS next_sort
+                FROM order_checklist_items
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            )
+
+            next_sort = int(
+                (
+                    cur.fetchone()
+                    or {}
+                ).get(
+                    "next_sort"
+                )
+                or 10
+            )
+
+            cur.execute(
+                """
+                INSERT INTO
+                    order_checklist_items (
+                        order_id,
+                        title,
+                        sort_order
+                    )
+                VALUES (
+                    %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    order_id,
+                    title,
+                    next_sort,
+                ),
+            )
+
+            created = dict(
+                cur.fetchone()
+            )
+
+            _workflow_add_activity(
+                cur,
+                order_id,
+                "checklist_added",
+                "Dodano zadanie do checklisty",
+                title,
+                actor,
+            )
+
+        conn.commit()
+
+    return created
+
+
+@app.patch(
+    "/order-checklist/{item_id}"
+)
+def update_order_checklist_item(
+    item_id: int,
+    data: OrderChecklistUpdate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    actor = _workflow_actor(
+        user
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_checklist_items
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (item_id,),
+            )
+
+            current = cur.fetchone()
+
+            if current is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono zadania checklisty"
+                    ),
+                )
+
+            cur.execute(
+                """
+                UPDATE order_checklist_items
+                SET
+                    is_done = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    data.is_done,
+                    item_id,
+                ),
+            )
+
+            updated = dict(
+                cur.fetchone()
+            )
+
+            if (
+                bool(
+                    current.get(
+                        "is_done"
+                    )
+                )
+                != data.is_done
+            ):
+                _workflow_add_activity(
+                    cur,
+                    int(
+                        current[
+                            "order_id"
+                        ]
+                    ),
+                    "checklist_changed",
+                    (
+                        "Wykonano zadanie"
+                        if data.is_done
+                        else "Cofnięto zadanie"
+                    ),
+                    str(
+                        current[
+                            "title"
+                        ]
+                    ),
+                    actor,
+                )
+
+        conn.commit()
+
+    return updated
+
+
+@app.delete(
+    "/order-checklist/{item_id}"
+)
+def delete_order_checklist_item(
+    item_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    actor = _workflow_actor(
+        user
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_checklist_items
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (item_id,),
+            )
+
+            item = cur.fetchone()
+
+            if item is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono zadania checklisty"
+                    ),
+                )
+
+            cur.execute(
+                """
+                DELETE FROM
+                    order_checklist_items
+                WHERE id = %s
+                """,
+                (item_id,),
+            )
+
+            _workflow_add_activity(
+                cur,
+                int(
+                    item[
+                        "order_id"
+                    ]
+                ),
+                "checklist_deleted",
+                "Usunięto zadanie z checklisty",
+                str(
+                    item[
+                        "title"
+                    ]
+                ),
+                actor,
+            )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+    }
+
+
+@app.get(
+    "/orders/{order_id}/activity"
+)
+def get_order_activity(
+    order_id: int,
+    limit: int = Query(
+        default=80,
+        ge=1,
+        le=300,
+    ),
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_workflow_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_activity
+                WHERE order_id = %s
+                ORDER BY
+                    created_at DESC,
+                    id DESC
+                LIMIT %s
+                """,
+                (
+                    order_id,
+                    limit,
+                ),
+            )
+
+            rows = cur.fetchall()
+
+        conn.commit()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
