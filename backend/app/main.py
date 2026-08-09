@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.38.0")
+app = FastAPI(title="YOKAI OS API", version="0.38.1")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.38.0",
+        "version": "0.38.1",
         "status": "running",
     }
 
@@ -16600,7 +16600,7 @@ import os as _promoos
 PROMO_MODEL = (
     _promoos.environ.get(
         "OPENAI_PROMO_MODEL",
-        "gpt-5-nano",
+        "gpt-4.1-nano",
     ).strip()
     or "gpt-5-nano"
 )
@@ -16829,7 +16829,28 @@ def ai_version_promotion(
         if not isinstance(content, str):
             raise RuntimeError("Brak treści odpowiedzi")
 
-        result = _promojson.loads(content)
+        content = content.strip()
+
+        if not content:
+            finish_reason = (
+                choices[0].get("finish_reason")
+                or "unknown"
+            )
+
+            raise RuntimeError(
+                "OpenAI zwrócił pustą treść "
+                f"(finish_reason={finish_reason})"
+            )
+
+        try:
+            result = _promojson.loads(content)
+        except _promojson.JSONDecodeError as exc:
+            preview = content[:180].replace("\n", " ")
+
+            raise RuntimeError(
+                "OpenAI zwrócił nieprawidłowy JSON: "
+                + preview
+            ) from exc
 
         return {
             **_promo_normalize(result),
