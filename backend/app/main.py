@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.24.0")
+app = FastAPI(title="YOKAI OS API", version="0.26.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.24.0",
+        "version": "0.26.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.24",
+                "User-Agent": "YOKAI-OS/0.26",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.24",
+            "User-Agent": "YOKAI-OS/0.26",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.24",
+            "User-Agent": "YOKAI-OS/0.26",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.24",
+            "User-Agent": "YOKAI-OS/0.26",
         },
     )
 
@@ -10783,4 +10783,1549 @@ def run_dashboard_quick_action(
             message,
         "order":
             result,
+    }
+
+# === YOKAI WOOCOMMERCE AUTOMATION + INVENTORY PRO V0.26 ===
+
+import base64 as _yw_b64
+import json as _yw_json
+import re as _yw_re
+import threading as _yw_threading
+import time as _yw_time
+import urllib.error as _yw_urlerror
+import urllib.parse as _yw_urlparse
+import urllib.request as _yw_urlrequest
+import uuid as _yw_uuid
+from decimal import Decimal as _YWDecimal
+
+
+class InventoryReceiptCreate(BaseModel):
+    quantity_m: _YWDecimal = Field(gt=0, le=100000)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class InventoryCorrectionCreate(BaseModel):
+    target_stock_m: _YWDecimal = Field(ge=0, le=1000000)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+def _yw_dec(value):
+    return _YWDecimal(str(value or 0))
+
+
+def _yw_num(value, places="0.0001"):
+    return float(_yw_dec(value).quantize(_YWDecimal(places)))
+
+
+def _yw_money(value):
+    return float(_yw_dec(value).quantize(_YWDecimal("0.01")))
+
+
+def _yw_columns(cur, table_name: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=%s
+        """,
+        (table_name,),
+    )
+    return {str(row["column_name"]) for row in cur.fetchall()}
+
+
+def _yw_threshold_column(cur) -> str:
+    columns = _yw_columns(cur, "materials")
+    for name in (
+        "low_stock_threshold_m",
+        "low_threshold_m",
+        "low_stock_threshold",
+        "low_threshold",
+    ):
+        if name in columns:
+            return name
+
+    cur.execute(
+        """
+        ALTER TABLE materials
+        ADD COLUMN IF NOT EXISTS low_stock_threshold_m
+            NUMERIC(14,4) NOT NULL DEFAULT 2
+        """
+    )
+    return "low_stock_threshold_m"
+
+
+def _ensure_inventory_pro_schema(cur):
+    threshold_column = _yw_threshold_column(cur)
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory_movements (
+            id BIGSERIAL PRIMARY KEY,
+            material_id BIGINT REFERENCES materials(id) ON DELETE SET NULL,
+            material_name TEXT NOT NULL,
+            movement_type TEXT NOT NULL,
+            delta_m NUMERIC(14,4) NOT NULL,
+            stock_before_m NUMERIC(14,4) NOT NULL,
+            stock_after_m NUMERIC(14,4) NOT NULL,
+            source_type TEXT,
+            source_id TEXT,
+            note TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS inventory_movements_material_idx
+        ON inventory_movements(material_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS inventory_movements_created_idx
+        ON inventory_movements(created_at DESC)
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION yokai_log_material_stock_movement()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            movement_kind TEXT;
+            source_kind TEXT;
+            source_value TEXT;
+            movement_note TEXT;
+        BEGIN
+            IF NEW.stock_length_m IS DISTINCT FROM OLD.stock_length_m THEN
+                movement_kind := NULLIF(
+                    current_setting('yokai.movement_type', TRUE), ''
+                );
+                source_kind := NULLIF(
+                    current_setting('yokai.source_type', TRUE), ''
+                );
+                source_value := NULLIF(
+                    current_setting('yokai.source_id', TRUE), ''
+                );
+                movement_note := NULLIF(
+                    current_setting('yokai.movement_note', TRUE), ''
+                );
+
+                IF movement_kind IS NULL THEN
+                    movement_kind := 'system_adjustment';
+                END IF;
+                IF source_kind IS NULL THEN
+                    source_kind := 'system';
+                END IF;
+
+                INSERT INTO inventory_movements (
+                    material_id, material_name, movement_type,
+                    delta_m, stock_before_m, stock_after_m,
+                    source_type, source_id, note
+                )
+                VALUES (
+                    NEW.id,
+                    COALESCE(NEW.name, 'Materiał #' || NEW.id),
+                    movement_kind,
+                    COALESCE(NEW.stock_length_m, 0)
+                        - COALESCE(OLD.stock_length_m, 0),
+                    COALESCE(OLD.stock_length_m, 0),
+                    COALESCE(NEW.stock_length_m, 0),
+                    source_kind,
+                    source_value,
+                    movement_note
+                );
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    cur.execute(
+        """
+        DROP TRIGGER IF EXISTS materials_stock_movement ON materials
+        """
+    )
+    cur.execute(
+        """
+        CREATE TRIGGER materials_stock_movement
+        AFTER UPDATE OF stock_length_m ON materials
+        FOR EACH ROW
+        EXECUTE FUNCTION yokai_log_material_stock_movement()
+        """
+    )
+
+    cur.execute(
+        """
+        INSERT INTO inventory_movements (
+            material_id, material_name, movement_type,
+            delta_m, stock_before_m, stock_after_m,
+            source_type, note
+        )
+        SELECT
+            m.id,
+            COALESCE(m.name, 'Materiał #' || m.id),
+            'opening_balance',
+            COALESCE(m.stock_length_m, 0),
+            0,
+            COALESCE(m.stock_length_m, 0),
+            'migration',
+            'Stan początkowy przy uruchomieniu Magazynu PRO'
+        FROM materials m
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM inventory_movements im
+            WHERE im.material_id = m.id
+        )
+        """
+    )
+
+    # Walidacja zgodności kolumny progu.
+    cur.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM materials
+        WHERE COALESCE({threshold_column}, 0) >= 0
+        """
+    )
+
+
+def _inventory_overview_rows(cur):
+    threshold_column = _yw_threshold_column(cur)
+    cur.execute(
+        f"""
+        WITH usage_30 AS (
+            SELECT
+                material_id,
+                COALESCE(SUM(
+                    CASE
+                        WHEN delta_m < 0
+                             AND movement_type NOT IN ('correction','opening_balance')
+                        THEN ABS(delta_m)
+                        ELSE 0
+                    END
+                ), 0) AS used_30d,
+                COALESCE(SUM(
+                    CASE
+                        WHEN delta_m > 0 AND movement_type='receipt'
+                        THEN delta_m
+                        ELSE 0
+                    END
+                ), 0) AS received_30d
+            FROM inventory_movements
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY material_id
+        )
+        SELECT
+            m.id, m.name, m.color_name, m.color_code,
+            m.width_cm, m.roll_length_m, m.purchase_price,
+            m.stock_length_m,
+            m.{threshold_column} AS threshold_m,
+            COALESCE(u.used_30d, 0) AS used_30d,
+            COALESCE(u.received_30d, 0) AS received_30d
+        FROM materials m
+        LEFT JOIN usage_30 u ON u.material_id=m.id
+        WHERE m.is_archived=FALSE
+        ORDER BY m.name, m.color_name NULLS LAST, m.id
+        """
+    )
+
+    result = []
+    for raw in cur.fetchall():
+        item = dict(raw)
+        stock = _yw_dec(item.get("stock_length_m"))
+        threshold = _yw_dec(item.get("threshold_m"))
+        used = _yw_dec(item.get("used_30d"))
+        received = _yw_dec(item.get("received_30d"))
+        roll_length = _yw_dec(item.get("roll_length_m"))
+        price = _yw_dec(item.get("purchase_price"))
+
+        cost_per_m = price / roll_length if roll_length > 0 else _YWDecimal("0")
+        stock_value = stock * cost_per_m
+        avg_daily = used / _YWDecimal("30")
+        days_left = stock / avg_daily if avg_daily > 0 else None
+        target = max(
+            threshold * _YWDecimal("2"),
+            avg_daily * _YWDecimal("60"),
+        )
+        recommended = max(target - stock, _YWDecimal("0"))
+        needs_purchase = (
+            stock <= threshold
+            or (days_left is not None and days_left <= _YWDecimal("21"))
+        )
+
+        item.update(
+            {
+                "id": int(item["id"]),
+                "stock_length_m": _yw_num(stock),
+                "threshold_m": _yw_num(threshold),
+                "used_30d": _yw_num(used),
+                "received_30d": _yw_num(received),
+                "avg_daily_usage_m": _yw_num(avg_daily),
+                "days_left": (
+                    None
+                    if days_left is None
+                    else _yw_num(days_left, "0.01")
+                ),
+                "cost_per_m": _yw_money(cost_per_m),
+                "stock_value": _yw_money(stock_value),
+                "recommended_purchase_m": _yw_num(recommended, "0.01"),
+                "needs_purchase": needs_purchase,
+            }
+        )
+
+        for field in ("width_cm", "roll_length_m", "purchase_price"):
+            if item.get(field) is not None:
+                item[field] = _yw_num(item[field])
+
+        result.append(item)
+
+    return result
+
+
+def _ensure_woo_pro_schema(cur):
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS woo_order_id BIGINT")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS woo_order_number TEXT")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS woo_status TEXT")
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS woo_last_synced_at TIMESTAMPTZ
+        """
+    )
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS woo_sync_error TEXT")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS orders_woo_order_id_idx
+        ON orders(woo_order_id)
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS woo_order_automation (
+            id BIGSERIAL PRIMARY KEY,
+            local_order_id BIGINT NOT NULL UNIQUE
+                REFERENCES orders(id) ON DELETE CASCADE,
+            woo_order_id BIGINT NOT NULL UNIQUE,
+            woo_order_number TEXT,
+            woo_status TEXT,
+            woo_currency TEXT,
+            woo_total NUMERIC(14,2),
+            payment_method TEXT,
+            payment_method_title TEXT,
+            billing_email TEXT,
+            customer_name TEXT,
+            sync_status TEXT NOT NULL DEFAULT 'pending',
+            sync_error TEXT,
+            warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+            woo_modified_at TEXT,
+            last_sync_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS woo_sync_log (
+            id BIGSERIAL PRIMARY KEY,
+            local_order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE,
+            woo_order_id BIGINT,
+            direction TEXT NOT NULL DEFAULT 'woo_to_yokai',
+            status TEXT NOT NULL,
+            message TEXT,
+            changes JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS woo_sync_log_order_idx
+        ON woo_sync_log(local_order_id, created_at DESC)
+        """
+    )
+
+    columns = _yw_columns(cur, "orders")
+    for candidate in (
+        "woocommerce_order_id",
+        "wc_order_id",
+        "external_order_id",
+        "external_id",
+    ):
+        if candidate not in columns:
+            continue
+        cur.execute(
+            f"""
+            UPDATE orders
+            SET woo_order_id = CASE
+                WHEN BTRIM({candidate}::TEXT) ~ '^[0-9]+$'
+                THEN BTRIM({candidate}::TEXT)::BIGINT
+                ELSE NULL
+            END
+            WHERE woo_order_id IS NULL AND {candidate} IS NOT NULL
+            """
+        )
+
+    if "source" in columns:
+        cur.execute(
+            """
+            UPDATE orders
+            SET woo_order_id = (
+                SUBSTRING(source FROM '#([0-9]+)')
+            )::BIGINT
+            WHERE
+                woo_order_id IS NULL
+                AND source ILIKE '%woo%'
+                AND source ~ '#[0-9]+'
+            """
+        )
+
+    cur.execute(
+        """
+        INSERT INTO woo_order_automation (
+            local_order_id, woo_order_id,
+            woo_order_number, woo_status, sync_status
+        )
+        SELECT DISTINCT ON (o.woo_order_id)
+            o.id, o.woo_order_id,
+            o.woo_order_number, o.woo_status, 'pending'
+        FROM orders o
+        WHERE o.woo_order_id IS NOT NULL
+        ORDER BY o.woo_order_id, o.id
+        ON CONFLICT DO NOTHING
+        """
+    )
+
+
+def _woo_settings():
+    base_url = os.environ.get("WC_URL", "").strip().rstrip("/")
+    key = os.environ.get("WC_CONSUMER_KEY", "").strip()
+    secret = os.environ.get("WC_CONSUMER_SECRET", "").strip()
+    if not base_url or not key or not secret:
+        raise RuntimeError("Brakuje konfiguracji WooCommerce API")
+    return base_url, key, secret
+
+
+def _woo_api(path: str, params: dict | None = None):
+    base_url, key, secret = _woo_settings()
+    url = f"{base_url}/wp-json/wc/v3/{path.lstrip('/')}"
+    if params:
+        url += "?" + _yw_urlparse.urlencode(params, doseq=True)
+
+    token = _yw_b64.b64encode(
+        f"{key}:{secret}".encode("utf-8")
+    ).decode("ascii")
+
+    request = _yw_urlrequest.Request(
+        url,
+        headers={
+            "Authorization": f"Basic {token}",
+            "Accept": "application/json",
+            "User-Agent": "YOKAI-OS/0.26",
+        },
+        method="GET",
+    )
+
+    try:
+        with _yw_urlrequest.urlopen(request, timeout=20) as response:
+            raw = response.read()
+    except _yw_urlerror.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        raise RuntimeError(
+            f"WooCommerce API HTTP {exc.code}"
+            + (f": {body[:220]}" if body else "")
+        ) from exc
+    except _yw_urlerror.URLError as exc:
+        raise RuntimeError("Brak połączenia z WooCommerce API") from exc
+
+    try:
+        return _yw_json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("WooCommerce zwrócił nieprawidłowy JSON") from exc
+
+
+def _woo_digits(value) -> str:
+    return _yw_re.sub(r"\D+", "", str(value or ""))
+
+
+def _woo_nip(payload: dict):
+    billing = payload.get("billing") or {}
+    for key in ("nip", "vat_number", "tax_id", "company_vat"):
+        value = _woo_digits(billing.get(key))
+        if len(value) == 10:
+            return value
+
+    for meta in payload.get("meta_data") or []:
+        key = str(meta.get("key") or "").lower()
+        if not ("nip" in key or "vat_number" in key or "tax_id" in key):
+            continue
+        value = _woo_digits(meta.get("value"))
+        if len(value) == 10:
+            return value
+
+    return None
+
+
+def _woo_address(data: dict) -> str:
+    parts = [
+        str(data.get("address_1") or "").strip(),
+        str(data.get("address_2") or "").strip(),
+        " ".join(
+            [
+                str(data.get("postcode") or "").strip(),
+                str(data.get("city") or "").strip(),
+            ]
+        ).strip(),
+        str(data.get("country") or "").strip(),
+    ]
+    return ", ".join([part for part in parts if part])
+
+
+def _woo_meta(items):
+    result = []
+    for meta in items or []:
+        key = str(meta.get("display_key") or meta.get("key") or "")
+        if not key or key.startswith("_"):
+            continue
+        value = meta.get("display_value")
+        if value is None:
+            value = meta.get("value")
+        if isinstance(value, (dict, list)):
+            try:
+                value = _yw_json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+        result.append({"key": key[:160], "value": str(value or "")[:1000]})
+        if len(result) >= 30:
+            break
+    return result
+
+
+def _woo_summary(payload: dict) -> dict:
+    billing = payload.get("billing") or {}
+    shipping = payload.get("shipping") or {}
+
+    company = str(billing.get("company") or "").strip()
+    full_name = " ".join(
+        [
+            str(billing.get("first_name") or "").strip(),
+            str(billing.get("last_name") or "").strip(),
+        ]
+    ).strip()
+    customer_name = company or full_name or "Klient WooCommerce"
+
+    items = []
+    for item in payload.get("line_items") or []:
+        items.append(
+            {
+                "id": item.get("id"),
+                "name": item.get("name") or "",
+                "product_id": item.get("product_id"),
+                "variation_id": item.get("variation_id"),
+                "quantity": item.get("quantity") or 0,
+                "subtotal": item.get("subtotal") or "0",
+                "total": item.get("total") or "0",
+                "sku": item.get("sku") or "",
+                "meta": _woo_meta(item.get("meta_data") or []),
+            }
+        )
+
+    warnings = []
+    if not items:
+        warnings.append("Brak produktów w zamówieniu")
+    if not str(billing.get("email") or "").strip():
+        warnings.append("Brak adresu e-mail")
+    if (
+        str(payload.get("shipping_total") or "0") not in {"0", "0.00"}
+        and not _woo_address(shipping)
+        and not _woo_address(billing)
+    ):
+        warnings.append("Brak adresu dostawy")
+
+    return {
+        "woo_order_id": int(payload.get("id") or 0),
+        "woo_order_number": str(
+            payload.get("number") or payload.get("id") or ""
+        ),
+        "status": str(payload.get("status") or ""),
+        "currency": str(payload.get("currency") or "PLN"),
+        "total": str(payload.get("total") or "0"),
+        "date_created": payload.get("date_created"),
+        "date_modified": payload.get("date_modified"),
+        "date_paid": payload.get("date_paid"),
+        "payment_method": payload.get("payment_method") or "",
+        "payment_method_title": payload.get("payment_method_title") or "",
+        "customer_note": payload.get("customer_note") or "",
+        "customer_name": customer_name,
+        "nip": _woo_nip(payload),
+        "billing": {
+            "first_name": billing.get("first_name") or "",
+            "last_name": billing.get("last_name") or "",
+            "company": company,
+            "email": billing.get("email") or "",
+            "phone": billing.get("phone") or "",
+            "address": _woo_address(billing),
+            "postcode": billing.get("postcode") or "",
+            "city": billing.get("city") or "",
+            "country": billing.get("country") or "",
+        },
+        "shipping": {
+            "first_name": shipping.get("first_name") or "",
+            "last_name": shipping.get("last_name") or "",
+            "company": shipping.get("company") or "",
+            "address": _woo_address(shipping),
+            "postcode": shipping.get("postcode") or "",
+            "city": shipping.get("city") or "",
+            "country": shipping.get("country") or "",
+        },
+        "shipping_method": ", ".join(
+            [
+                str(
+                    line.get("method_title")
+                    or line.get("method_id")
+                    or ""
+                )
+                for line in payload.get("shipping_lines") or []
+                if line.get("method_title") or line.get("method_id")
+            ]
+        ),
+        "items": items,
+        "order_meta": _woo_meta(payload.get("meta_data") or []),
+        "warnings": warnings,
+    }
+
+
+def _woo_upsert_client(cur, summary: dict):
+    billing = summary.get("billing") or {}
+    nip = summary.get("nip") or None
+    email = str(billing.get("email") or "").strip()
+    phone = str(billing.get("phone") or "").strip()
+    company = str(billing.get("company") or "").strip()
+    first_name = str(billing.get("first_name") or "").strip()
+    last_name = str(billing.get("last_name") or "").strip()
+    display_name = company or " ".join([first_name, last_name]).strip()
+
+    if not display_name and not email and not phone and not nip:
+        return None
+
+    client = None
+
+    if nip:
+        cur.execute(
+            """
+            SELECT * FROM clients
+            WHERE nip=%s AND is_archived=FALSE
+            ORDER BY id LIMIT 1
+            """,
+            (nip,),
+        )
+        client = cur.fetchone()
+
+    if client is None and email:
+        cur.execute(
+            """
+            SELECT * FROM clients
+            WHERE LOWER(COALESCE(email,''))=LOWER(%s)
+              AND is_archived=FALSE
+            ORDER BY id LIMIT 1
+            """,
+            (email,),
+        )
+        client = cur.fetchone()
+
+    if client is None and display_name:
+        cur.execute(
+            """
+            SELECT * FROM clients
+            WHERE LOWER(BTRIM(display_name))=LOWER(BTRIM(%s))
+              AND is_archived=FALSE
+            ORDER BY id LIMIT 1
+            """,
+            (display_name,),
+        )
+        client = cur.fetchone()
+
+    client_type = "company" if company else "person"
+    address = str(billing.get("address") or "").strip()
+    postal = str(billing.get("postcode") or "").strip()
+    city = str(billing.get("city") or "").strip()
+    country = str(billing.get("country") or "").strip()
+
+    if client is not None:
+        client_id = int(client["id"])
+        cur.execute(
+            """
+            UPDATE clients
+            SET
+                client_type=%s,
+                first_name=COALESCE(NULLIF(%s,''), first_name),
+                last_name=COALESCE(NULLIF(%s,''), last_name),
+                company_name=COALESCE(NULLIF(%s,''), company_name),
+                display_name=COALESCE(NULLIF(%s,''), display_name),
+                nip=COALESCE(NULLIF(%s,''), nip),
+                email=COALESCE(NULLIF(%s,''), email),
+                phone=COALESCE(NULLIF(%s,''), phone),
+                address=COALESCE(NULLIF(%s,''), address),
+                postal_code=COALESCE(NULLIF(%s,''), postal_code),
+                city=COALESCE(NULLIF(%s,''), city),
+                country=COALESCE(NULLIF(%s,''), country),
+                updated_at=NOW()
+            WHERE id=%s
+            """,
+            (
+                client_type,
+                first_name,
+                last_name,
+                company,
+                display_name,
+                nip or "",
+                email,
+                phone,
+                address,
+                postal,
+                city,
+                country,
+                client_id,
+            ),
+        )
+        return client_id
+
+    temp_number = "AUTO-" + _yw_uuid.uuid4().hex[:12]
+    cur.execute(
+        """
+        INSERT INTO clients (
+            client_number, client_type,
+            first_name, last_name, company_name, display_name,
+            nip, email, phone, address, postal_code, city, country, notes
+        )
+        VALUES (
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+        )
+        RETURNING id
+        """,
+        (
+            temp_number,
+            client_type,
+            first_name or None,
+            last_name or None,
+            company or None,
+            display_name or email or phone or "Klient WooCommerce",
+            nip,
+            email or None,
+            phone or None,
+            address or None,
+            postal or None,
+            city or None,
+            country or None,
+            "Utworzono automatycznie z WooCommerce.",
+        ),
+    )
+    client_id = int(cur.fetchone()["id"])
+    cur.execute(
+        """
+        UPDATE clients
+        SET client_number=%s, updated_at=NOW()
+        WHERE id=%s
+        """,
+        (f"KL-{client_id:05d}", client_id),
+    )
+    return client_id
+
+
+def _woo_local_for_remote(cur, woo_order_id: int):
+    cur.execute(
+        """
+        SELECT local_order_id
+        FROM woo_order_automation
+        WHERE woo_order_id=%s
+        LIMIT 1
+        """,
+        (woo_order_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row["local_order_id"])
+
+    cur.execute(
+        """
+        SELECT id
+        FROM orders
+        WHERE woo_order_id=%s
+        ORDER BY id LIMIT 1
+        """,
+        (woo_order_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row["id"])
+
+    columns = _yw_columns(cur, "orders")
+    if "source" in columns:
+        cur.execute(
+            """
+            SELECT id
+            FROM orders
+            WHERE source ILIKE '%woo%' AND source ILIKE %s
+            ORDER BY id LIMIT 1
+            """,
+            (f"%#{woo_order_id}%",),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row["id"])
+
+    return None
+
+
+def _woo_remote_for_local(cur, local_order_id: int):
+    cur.execute(
+        """
+        SELECT COALESCE(a.woo_order_id, o.woo_order_id) AS woo_order_id
+        FROM orders o
+        LEFT JOIN woo_order_automation a ON a.local_order_id=o.id
+        WHERE o.id=%s
+        """,
+        (local_order_id,),
+    )
+    row = cur.fetchone()
+    if row and row.get("woo_order_id") is not None:
+        return int(row["woo_order_id"])
+    return None
+
+
+def _woo_apply(cur, local_order_id: int, payload: dict, actor="manual"):
+    summary = _woo_summary(payload)
+    woo_order_id = int(summary["woo_order_id"])
+
+    cur.execute(
+        """
+        SELECT * FROM woo_order_automation
+        WHERE local_order_id=%s
+        """,
+        (local_order_id,),
+    )
+    old = cur.fetchone()
+    old_payload = (old.get("payload") if old else {}) or {}
+
+    client_id = _woo_upsert_client(cur, summary)
+    total = _yw_dec(summary.get("total"))
+    customer_name = str(summary.get("customer_name") or "").strip()
+    woo_status = str(summary.get("status") or "")
+
+    cur.execute(
+        """
+        SELECT status, paid_amount, payment_status
+        FROM orders
+        WHERE id=%s
+        FOR UPDATE
+        """,
+        (local_order_id,),
+    )
+    current = cur.fetchone() or {}
+
+    paid_from_woo = bool(
+        summary.get("date_paid")
+        or woo_status == "completed"
+    )
+    next_paid = (
+        total
+        if paid_from_woo
+        else _yw_dec(current.get("paid_amount"))
+    )
+    payment_status = (
+        "Opłacone"
+        if paid_from_woo
+        else current.get("payment_status") or "Nieopłacone"
+    )
+    local_status_override = (
+        "Anulowane"
+        if woo_status in {"cancelled", "refunded", "failed"}
+        else None
+    )
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET
+            woo_order_id=%s,
+            woo_order_number=%s,
+            woo_status=%s,
+            woo_last_synced_at=NOW(),
+            woo_sync_error=NULL,
+            client_id=COALESCE(%s, client_id),
+            client_name=CASE WHEN %s<>'' THEN %s ELSE client_name END,
+            price=CASE WHEN %s>0 THEN %s ELSE price END,
+            paid_amount=%s,
+            payment_status=%s,
+            status=COALESCE(%s, status),
+            updated_at=NOW()
+        WHERE id=%s
+        """,
+        (
+            woo_order_id,
+            summary.get("woo_order_number"),
+            woo_status,
+            client_id,
+            customer_name,
+            customer_name,
+            total,
+            total,
+            next_paid,
+            payment_status,
+            local_status_override,
+            local_order_id,
+        ),
+    )
+
+    warnings = list(summary.get("warnings") or [])
+    if client_id is None:
+        warnings.append("Nie udało się powiązać karty klienta")
+
+    def tracked(data):
+        if not isinstance(data, dict):
+            return {}
+        return {
+            "status": data.get("status"),
+            "total": data.get("total"),
+            "date_paid": data.get("date_paid"),
+            "customer_name": data.get("customer_name"),
+            "billing_email": (data.get("billing") or {}).get("email"),
+            "items": [
+                (
+                    item.get("product_id"),
+                    item.get("variation_id"),
+                    item.get("quantity"),
+                    item.get("total"),
+                )
+                for item in data.get("items") or []
+            ],
+        }
+
+    before = tracked(old_payload)
+    after = tracked(summary)
+    changes = {}
+    for key, value in after.items():
+        if old is None or before.get(key) != value:
+            changes[key] = {"old": before.get(key), "new": value}
+
+    cur.execute(
+        """
+        INSERT INTO woo_order_automation (
+            local_order_id, woo_order_id, woo_order_number,
+            woo_status, woo_currency, woo_total,
+            payment_method, payment_method_title,
+            billing_email, customer_name,
+            sync_status, sync_error, warnings, payload,
+            woo_modified_at, last_sync_at, updated_at
+        )
+        VALUES (
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            'ok',NULL,%s,%s,%s,NOW(),NOW()
+        )
+        ON CONFLICT(local_order_id)
+        DO UPDATE SET
+            woo_order_id=EXCLUDED.woo_order_id,
+            woo_order_number=EXCLUDED.woo_order_number,
+            woo_status=EXCLUDED.woo_status,
+            woo_currency=EXCLUDED.woo_currency,
+            woo_total=EXCLUDED.woo_total,
+            payment_method=EXCLUDED.payment_method,
+            payment_method_title=EXCLUDED.payment_method_title,
+            billing_email=EXCLUDED.billing_email,
+            customer_name=EXCLUDED.customer_name,
+            sync_status='ok',
+            sync_error=NULL,
+            warnings=EXCLUDED.warnings,
+            payload=EXCLUDED.payload,
+            woo_modified_at=EXCLUDED.woo_modified_at,
+            last_sync_at=NOW(),
+            updated_at=NOW()
+        """,
+        (
+            local_order_id,
+            woo_order_id,
+            summary.get("woo_order_number"),
+            woo_status,
+            summary.get("currency"),
+            total,
+            summary.get("payment_method"),
+            summary.get("payment_method_title"),
+            (summary.get("billing") or {}).get("email"),
+            customer_name,
+            Jsonb(warnings),
+            Jsonb(summary),
+            summary.get("date_modified"),
+        ),
+    )
+
+    if changes or actor != "background":
+        cur.execute(
+            """
+            INSERT INTO woo_sync_log (
+                local_order_id, woo_order_id, direction,
+                status, message, changes
+            )
+            VALUES (%s,%s,'woo_to_yokai','ok',%s,%s)
+            """,
+            (
+                local_order_id,
+                woo_order_id,
+                (
+                    "Synchronizacja WooCommerce"
+                    if changes
+                    else "Synchronizacja WooCommerce — bez zmian"
+                ),
+                Jsonb(changes),
+            ),
+        )
+
+    return {
+        "local_order_id": local_order_id,
+        "woo_order_id": woo_order_id,
+        "changes": changes,
+        "warnings": warnings,
+        "client_id": client_id,
+    }
+
+
+def _woo_record_error(cur, local_order_id: int, remote_id, message: str):
+    cur.execute(
+        """
+        UPDATE orders
+        SET woo_sync_error=%s, woo_last_synced_at=NOW(), updated_at=NOW()
+        WHERE id=%s
+        """,
+        (message[:1000], local_order_id),
+    )
+
+    cur.execute(
+        """
+        INSERT INTO woo_sync_log (
+            local_order_id, woo_order_id, direction,
+            status, message, changes
+        )
+        VALUES (%s,%s,'woo_to_yokai','error',%s,'{}'::jsonb)
+        """,
+        (local_order_id, remote_id, message[:1000]),
+    )
+
+
+def _woo_sync_local(local_order_id: int, actor="manual"):
+    remote_id = None
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                _ensure_woo_pro_schema(cur)
+                remote_id = _woo_remote_for_local(cur, local_order_id)
+                if remote_id is None:
+                    raise RuntimeError(
+                        "Nie udało się ustalić ID zamówienia WooCommerce"
+                    )
+            conn.commit()
+
+            payload = _woo_api(f"orders/{remote_id}")
+            if not isinstance(payload, dict):
+                raise RuntimeError("WooCommerce zwrócił nieprawidłowe dane")
+
+            with conn.cursor() as cur:
+                result = _woo_apply(cur, local_order_id, payload, actor)
+            conn.commit()
+            return result
+
+        except Exception as exc:
+            conn.rollback()
+            try:
+                with conn.cursor() as cur:
+                    _woo_record_error(
+                        cur,
+                        local_order_id,
+                        remote_id,
+                        str(exc),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            raise
+
+
+def _woo_sync_recent(actor="background"):
+    payloads = _woo_api(
+        "orders",
+        {
+            "per_page": 100,
+            "orderby": "modified",
+            "order": "desc",
+            "status": "any",
+        },
+    )
+    if not isinstance(payloads, list):
+        raise RuntimeError("WooCommerce nie zwrócił listy zamówień")
+
+    synced = 0
+    changed = 0
+    skipped = 0
+    errors = []
+
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                _ensure_woo_pro_schema(cur)
+
+                for payload in payloads:
+                    if not isinstance(payload, dict):
+                        continue
+                    remote_id = int(payload.get("id") or 0)
+                    if remote_id <= 0:
+                        continue
+
+                    local_id = _woo_local_for_remote(cur, remote_id)
+                    if local_id is None:
+                        skipped += 1
+                        continue
+
+                    try:
+                        result = _woo_apply(cur, local_id, payload, actor)
+                        synced += 1
+                        if result.get("changes"):
+                            changed += 1
+                    except Exception as exc:
+                        errors.append(
+                            {
+                                "woo_order_id": remote_id,
+                                "local_order_id": local_id,
+                                "error": str(exc)[:400],
+                            }
+                        )
+
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "synced": synced,
+        "changed": changed,
+        "skipped_unlinked": skipped,
+        "errors": errors,
+    }
+
+
+_yw_worker_started = False
+_yw_worker_guard = _yw_threading.Lock()
+
+
+def _yw_woo_worker():
+    _yw_time.sleep(45)
+    while True:
+        try:
+            _woo_sync_recent("background")
+        except Exception as exc:
+            print(
+                "YOKAI Woo automation:",
+                str(exc)[:400],
+                flush=True,
+            )
+        _yw_time.sleep(600)
+
+
+@app.on_event("startup")
+def startup_woo_inventory_pro():
+    global _yw_worker_started
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_inventory_pro_schema(cur)
+            _ensure_woo_pro_schema(cur)
+        conn.commit()
+
+    with _yw_worker_guard:
+        if not _yw_worker_started:
+            worker = _yw_threading.Thread(
+                target=_yw_woo_worker,
+                daemon=True,
+                name="yokai-woo-automation",
+            )
+            worker.start()
+            _yw_worker_started = True
+
+
+@app.get("/inventory/overview")
+def inventory_overview(
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_inventory_pro_schema(cur)
+            materials = _inventory_overview_rows(cur)
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(
+                        CASE
+                            WHEN delta_m < 0
+                                 AND movement_type NOT IN (
+                                     'correction','opening_balance'
+                                 )
+                            THEN ABS(delta_m)
+                            ELSE 0
+                        END
+                    ), 0) AS usage_30d,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN delta_m > 0 AND movement_type='receipt'
+                            THEN delta_m
+                            ELSE 0
+                        END
+                    ), 0) AS receipts_30d
+                FROM inventory_movements
+                WHERE created_at >= NOW() - INTERVAL '30 days'
+                """
+            )
+            totals = cur.fetchone() or {}
+        conn.commit()
+
+    purchase = [item for item in materials if item.get("needs_purchase")]
+    purchase.sort(
+        key=lambda item: (
+            0
+            if item.get("stock_length_m", 0)
+            <= item.get("threshold_m", 0)
+            else 1,
+            item.get("days_left")
+            if item.get("days_left") is not None
+            else 999999,
+        )
+    )
+
+    return {
+        "materials_count": len(materials),
+        "stock_value": _yw_money(
+            sum(
+                (_yw_dec(item.get("stock_value")) for item in materials),
+                _YWDecimal("0"),
+            )
+        ),
+        "usage_30d_m": _yw_num(totals.get("usage_30d")),
+        "receipts_30d_m": _yw_num(totals.get("receipts_30d")),
+        "purchase_count": len(purchase),
+        "purchase_list": purchase,
+        "materials": materials,
+    }
+
+
+@app.get("/inventory/purchase-list")
+def inventory_purchase_list(
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_inventory_pro_schema(cur)
+            items = _inventory_overview_rows(cur)
+        conn.commit()
+
+    result = [item for item in items if item.get("needs_purchase")]
+    result.sort(
+        key=lambda item: (
+            item.get("days_left")
+            if item.get("days_left") is not None
+            else 999999,
+            item.get("stock_length_m", 0),
+        )
+    )
+    return result
+
+
+@app.get("/inventory/movements")
+def inventory_movements(
+    material_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_inventory_pro_schema(cur)
+            if material_id is None:
+                cur.execute(
+                    """
+                    SELECT * FROM inventory_movements
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM inventory_movements
+                    WHERE material_id=%s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (material_id, limit),
+                )
+            rows = cur.fetchall()
+        conn.commit()
+
+    result = []
+    for row in rows:
+        item = dict(row)
+        for field in ("delta_m", "stock_before_m", "stock_after_m"):
+            item[field] = _yw_num(item.get(field))
+        result.append(item)
+    return result
+
+
+@app.post("/materials/{material_id}/stock-receipt")
+def inventory_stock_receipt(
+    material_id: int,
+    data: InventoryReceiptCreate,
+    user: dict = Depends(get_current_user),
+):
+    quantity = _yw_dec(data.quantity_m)
+    note = data.note.strip() if data.note else ""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_inventory_pro_schema(cur)
+            cur.execute(
+                """
+                SELECT * FROM materials
+                WHERE id=%s AND is_archived=FALSE
+                FOR UPDATE
+                """,
+                (material_id,),
+            )
+            material = cur.fetchone()
+            if material is None:
+                raise HTTPException(status_code=404, detail="Nie znaleziono materiału")
+
+            cur.execute(
+                """
+                SELECT
+                    set_config('yokai.movement_type','receipt',TRUE),
+                    set_config('yokai.source_type','manual_receipt',TRUE),
+                    set_config('yokai.source_id',%s,TRUE),
+                    set_config('yokai.movement_note',%s,TRUE)
+                """,
+                (str(material_id), note),
+            )
+            cur.execute(
+                """
+                UPDATE materials
+                SET
+                    stock_length_m=COALESCE(stock_length_m,0)+%s,
+                    updated_at=NOW()
+                WHERE id=%s
+                RETURNING *
+                """,
+                (quantity, material_id),
+            )
+            updated = dict(cur.fetchone())
+        conn.commit()
+
+    updated["stock_length_m"] = _yw_num(updated.get("stock_length_m"))
+    return updated
+
+
+@app.post("/materials/{material_id}/stock-correction")
+def inventory_stock_correction(
+    material_id: int,
+    data: InventoryCorrectionCreate,
+    user: dict = Depends(get_current_user),
+):
+    target = _yw_dec(data.target_stock_m)
+    note = data.note.strip() if data.note else ""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_inventory_pro_schema(cur)
+            cur.execute(
+                """
+                SELECT * FROM materials
+                WHERE id=%s AND is_archived=FALSE
+                FOR UPDATE
+                """,
+                (material_id,),
+            )
+            material = cur.fetchone()
+            if material is None:
+                raise HTTPException(status_code=404, detail="Nie znaleziono materiału")
+
+            cur.execute(
+                """
+                SELECT
+                    set_config('yokai.movement_type','correction',TRUE),
+                    set_config('yokai.source_type','manual_correction',TRUE),
+                    set_config('yokai.source_id',%s,TRUE),
+                    set_config('yokai.movement_note',%s,TRUE)
+                """,
+                (str(material_id), note),
+            )
+            cur.execute(
+                """
+                UPDATE materials
+                SET stock_length_m=%s, updated_at=NOW()
+                WHERE id=%s
+                RETURNING *
+                """,
+                (target, material_id),
+            )
+            updated = dict(cur.fetchone())
+        conn.commit()
+
+    updated["stock_length_m"] = _yw_num(updated.get("stock_length_m"))
+    return updated
+
+
+@app.get("/orders/{order_id}/woo-automation")
+def order_woo_automation(
+    order_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_woo_pro_schema(cur)
+
+            cur.execute(
+                """
+                SELECT
+                    id, order_number, source,
+                    woo_order_id, woo_order_number, woo_status,
+                    woo_last_synced_at, woo_sync_error
+                FROM orders
+                WHERE id=%s
+                """,
+                (order_id,),
+            )
+            order = cur.fetchone()
+            if order is None:
+                raise HTTPException(status_code=404, detail="Nie znaleziono zamówienia")
+
+            cur.execute(
+                """
+                SELECT * FROM woo_order_automation
+                WHERE local_order_id=%s
+                """,
+                (order_id,),
+            )
+            automation = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT * FROM woo_sync_log
+                WHERE local_order_id=%s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 30
+                """,
+                (order_id,),
+            )
+            logs = cur.fetchall()
+        conn.commit()
+
+    source = str(order.get("source") or "")
+    is_woo = bool(
+        order.get("woo_order_id")
+        or automation
+        or "woo" in source.lower()
+    )
+
+    return {
+        "is_woo": is_woo,
+        "local_order": {
+            "id": int(order["id"]),
+            "order_number": order.get("order_number"),
+            "source": source,
+            "woo_order_id": (
+                int(order["woo_order_id"])
+                if order.get("woo_order_id") is not None
+                else None
+            ),
+            "woo_order_number": order.get("woo_order_number"),
+            "woo_status": order.get("woo_status"),
+            "woo_last_synced_at": order.get("woo_last_synced_at"),
+            "woo_sync_error": order.get("woo_sync_error"),
+        },
+        "automation": dict(automation) if automation else None,
+        "logs": [dict(row) for row in logs],
+    }
+
+
+@app.post("/orders/{order_id}/woo-automation/sync")
+def order_woo_sync(
+    order_id: int,
+    user: dict = Depends(get_current_user),
+):
+    try:
+        result = _woo_sync_local(order_id, "manual")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:1000]) from exc
+
+    return {
+        "ok": True,
+        "message": "Synchronizacja WooCommerce zakończona",
+        **result,
+    }
+
+
+@app.post("/woocommerce/automation/sync")
+def woo_automation_sync(
+    user: dict = Depends(get_current_user),
+):
+    try:
+        result = _woo_sync_recent("manual")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:1000]) from exc
+
+    return {
+        "ok": True,
+        "message": "Synchronizacja automatyczna zakończona",
+        **result,
+    }
+
+
+@app.get("/woocommerce/automation/status")
+def woo_automation_status(
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_woo_pro_schema(cur)
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS linked_orders,
+                    COUNT(*) FILTER (WHERE sync_status='error') AS errors,
+                    MAX(last_sync_at) AS last_sync_at
+                FROM woo_order_automation
+                """
+            )
+            stats = cur.fetchone() or {}
+
+            cur.execute(
+                """
+                SELECT COUNT(*) AS changes_24h
+                FROM woo_sync_log
+                WHERE
+                    created_at >= NOW() - INTERVAL '24 hours'
+                    AND status='ok'
+                    AND changes <> '{}'::jsonb
+                """
+            )
+            recent = cur.fetchone() or {}
+        conn.commit()
+
+    return {
+        "linked_orders": int(stats.get("linked_orders") or 0),
+        "errors": int(stats.get("errors") or 0),
+        "last_sync_at": stats.get("last_sync_at"),
+        "changes_24h": int(recent.get("changes_24h") or 0),
+        "interval_seconds": 600,
     }

@@ -1,5 +1,7 @@
 "use client";
 
+import { InventoryPro } from "../../components/inventory-pro";
+
 import { SidebarAttentionBadge } from "../../components/sidebar-attention-badge";
 
 import { BulkOperationsButton } from "../../components/bulk-operations-button";
@@ -1373,6 +1375,7 @@ export default function MaterialsPage() {
         </div>
       )}
           <BulkOperationsButton entity="materials" />
+        <InventoryPro />
 </main>
   );
 }
