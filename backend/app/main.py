@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.33.0")
+app = FastAPI(title="YOKAI OS API", version="0.33.2")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.33.0",
+        "version": "0.33.2",
         "status": "running",
     }
 
@@ -13005,6 +13005,8 @@ def order_ai_projects(order_id: int, user: dict = Depends(get_current_user)):
     return [dict(x) for x in rows]
 
 # === YOKAI BUSINESS CONTROL SUITE V0.33 ===
+from psycopg.types.json import Jsonb as _SuiteJsonb
+
 
 import csv as _suite_csv
 import io as _suite_io
@@ -13107,7 +13109,7 @@ def _suite_schema(
             """,
             (
                 key,
-                Jsonb(
+                _SuiteJsonb(
                     value
                 ),
             ),
@@ -15153,7 +15155,7 @@ def update_suite_settings(
                     """,
                     (
                         key,
-                        Jsonb(
+                        _SuiteJsonb(
                             value
                         ),
                     ),
