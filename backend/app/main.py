@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.33.2")
+app = FastAPI(title="YOKAI OS API", version="0.36.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.33.2",
+        "version": "0.36.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.33",
+                "User-Agent": "YOKAI-OS/0.36",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.33",
+            "User-Agent": "YOKAI-OS/0.36",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.33",
+            "User-Agent": "YOKAI-OS/0.36",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.33",
+            "User-Agent": "YOKAI-OS/0.36",
         },
     )
 
@@ -11225,7 +11225,7 @@ def _woo_api(path: str, params: dict | None = None):
         headers={
             "Authorization": f"Basic {token}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.33",
+            "User-Agent": "YOKAI-OS/0.36",
         },
         method="GET",
     )
@@ -12486,7 +12486,7 @@ def _ai_http_json(endpoint, payload):
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.33",
+            "User-Agent": "YOKAI-OS/0.36",
         },
         method="POST",
     )
@@ -12561,7 +12561,7 @@ def _ai_generate(prompt, refs, quality, size):
             "Authorization": f"Bearer {key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.33",
+            "User-Agent": "YOKAI-OS/0.36",
         },
         method="POST",
     )
@@ -15688,3 +15688,904 @@ def export_suite_reports_csv(
                 )
         },
     )
+
+# === YOKAI PRODUCTION PRO V0.36 ===
+
+from datetime import datetime as _ProdDateTime
+
+
+class ProductionMaterialUseIn(BaseModel):
+    material_id: int
+    used_length_m: float
+
+
+class ProductionFinishIn(BaseModel):
+    notes: str | None = None
+
+
+def _prod_schema(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMPTZ,
+            material_cost NUMERIC(12, 2) NOT NULL DEFAULT 0,
+            labor_cost NUMERIC(12, 2) NOT NULL DEFAULT 0,
+            revenue NUMERIC(12, 2) NOT NULL DEFAULT 0,
+            profit NUMERIC(12, 2) NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            ux_production_sessions_active_order
+        ON production_sessions(order_id)
+        WHERE finished_at IS NULL
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_material_usage (
+            id BIGSERIAL PRIMARY KEY,
+            session_id BIGINT NOT NULL
+                REFERENCES production_sessions(id)
+                ON DELETE CASCADE,
+            order_id BIGINT NOT NULL
+                REFERENCES orders(id)
+                ON DELETE CASCADE,
+            material_id BIGINT NOT NULL
+                REFERENCES materials(id),
+            material_name TEXT NOT NULL,
+            color_name TEXT,
+            used_length_m NUMERIC(12, 3) NOT NULL,
+            cost_per_m NUMERIC(12, 4) NOT NULL DEFAULT 0,
+            cost_total NUMERIC(12, 2) NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            ix_production_material_usage_order
+        ON production_material_usage(order_id, created_at DESC)
+        """
+    )
+
+
+def _prod_columns(cur, table_name: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE
+            table_schema = 'public'
+            AND table_name = %s
+        """,
+        (table_name,),
+    )
+
+    return {
+        str(row["column_name"])
+        for row in cur.fetchall()
+    }
+
+
+def _prod_material_price_per_m(row: dict, columns: set[str]) -> float:
+    price = 0.0
+    roll_length = 0.0
+
+    for candidate in (
+        "price",
+        "purchase_price",
+        "roll_price",
+        "cost",
+    ):
+        if candidate in columns and row.get(candidate) is not None:
+            try:
+                price = float(row.get(candidate) or 0)
+            except Exception:
+                price = 0.0
+
+            if price:
+                break
+
+    for candidate in (
+        "roll_length_m",
+        "length_m",
+        "roll_length",
+    ):
+        if candidate in columns and row.get(candidate) is not None:
+            try:
+                roll_length = float(row.get(candidate) or 0)
+            except Exception:
+                roll_length = 0.0
+
+            if roll_length:
+                break
+
+    if price > 0 and roll_length > 0:
+        return price / roll_length
+
+    return 0.0
+
+
+def _prod_get_order(cur, order_id: int) -> dict:
+    cur.execute(
+        """
+        SELECT *
+        FROM orders
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (order_id,),
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono zamówienia",
+        )
+
+    return dict(row)
+
+
+def _prod_get_active_session(cur, order_id: int) -> dict | None:
+    cur.execute(
+        """
+        SELECT *
+        FROM production_sessions
+        WHERE
+            order_id = %s
+            AND finished_at IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (order_id,),
+    )
+
+    row = cur.fetchone()
+
+    return dict(row) if row is not None else None
+
+
+def _prod_session_payload(cur, session: dict) -> dict:
+    session_id = int(session["id"])
+
+    cur.execute(
+        """
+        SELECT
+            id,
+            material_id,
+            material_name,
+            color_name,
+            used_length_m,
+            cost_per_m,
+            cost_total,
+            created_at
+        FROM production_material_usage
+        WHERE session_id = %s
+        ORDER BY id ASC
+        """,
+        (session_id,),
+    )
+
+    usages = [
+        dict(row)
+        for row in cur.fetchall()
+    ]
+
+    started_at = session.get("started_at")
+    finished_at = session.get("finished_at")
+
+    duration_seconds = 0
+
+    if started_at is not None:
+        now = _ProdDateTime.now(
+            started_at.tzinfo
+        )
+
+        end = finished_at or now
+
+        duration_seconds = max(
+            int((end - started_at).total_seconds()),
+            0,
+        )
+
+    return {
+        **session,
+        "duration_seconds": duration_seconds,
+        "material_usage": usages,
+        "material_cost_live": round(
+            sum(
+                float(row.get("cost_total") or 0)
+                for row in usages
+            ),
+            2,
+        ),
+    }
+
+
+def _prod_materials(cur) -> list[dict]:
+    columns = _prod_columns(cur, "materials")
+
+    wanted = [
+        candidate
+        for candidate in (
+            "id",
+            "name",
+            "color_name",
+            "color",
+            "stock_length_m",
+            "price",
+            "purchase_price",
+            "roll_price",
+            "cost",
+            "roll_length_m",
+            "length_m",
+            "roll_length",
+            "is_archived",
+        )
+        if candidate in columns
+    ]
+
+    if "id" not in wanted or "name" not in wanted:
+        return []
+
+    archive_clause = (
+        "WHERE COALESCE(is_archived, FALSE) = FALSE"
+        if "is_archived" in columns
+        else ""
+    )
+
+    cur.execute(
+        f"""
+        SELECT {", ".join(wanted)}
+        FROM materials
+        {archive_clause}
+        ORDER BY name, id
+        """
+    )
+
+    result = []
+
+    for raw in cur.fetchall():
+        row = dict(raw)
+
+        color_name = (
+            row.get("color_name")
+            or row.get("color")
+        )
+
+        stock = (
+            float(row.get("stock_length_m") or 0)
+            if "stock_length_m" in columns
+            else 0.0
+        )
+
+        cost_per_m = _prod_material_price_per_m(
+            row,
+            columns,
+        )
+
+        result.append(
+            {
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "color_name": color_name,
+                "stock_length_m": stock,
+                "cost_per_m": round(cost_per_m, 4),
+            }
+        )
+
+    return result
+
+
+def _prod_board(cur) -> dict:
+    _prod_schema(cur)
+
+    order_columns = _prod_columns(cur, "orders")
+
+    fields = ["id"]
+
+    for candidate in (
+        "order_number",
+        "name",
+        "client_name",
+        "status",
+        "price",
+        "priority",
+        "deadline",
+        "source",
+        "is_archived",
+    ):
+        if candidate in order_columns:
+            fields.append(candidate)
+
+    archive_clause = (
+        "AND COALESCE(is_archived, FALSE) = FALSE"
+        if "is_archived" in order_columns
+        else ""
+    )
+
+    status_clause = (
+        """
+        AND COALESCE(status, '') NOT IN (
+            'Zrealizowane',
+            'Anulowane'
+        )
+        """
+        if "status" in order_columns
+        else ""
+    )
+
+    order_by = (
+        "ORDER BY deadline NULLS LAST, id DESC"
+        if "deadline" in order_columns
+        else "ORDER BY id DESC"
+    )
+
+    cur.execute(
+        f"""
+        SELECT {", ".join(fields)}
+        FROM orders
+        WHERE 1=1
+            {archive_clause}
+            {status_clause}
+        {order_by}
+        LIMIT 150
+        """
+    )
+
+    orders = [
+        dict(row)
+        for row in cur.fetchall()
+    ]
+
+    for order in orders:
+        session = _prod_get_active_session(
+            cur,
+            int(order["id"]),
+        )
+
+        order["active_session"] = (
+            _prod_session_payload(cur, session)
+            if session is not None
+            else None
+        )
+
+    number_expr = (
+        "o.order_number"
+        if "order_number" in order_columns
+        else "ps.order_id::text"
+    )
+
+    name_expr = (
+        "o.name"
+        if "name" in order_columns
+        else "''::text"
+    )
+
+    client_expr = (
+        "o.client_name"
+        if "client_name" in order_columns
+        else "''::text"
+    )
+
+    cur.execute(
+        f"""
+        SELECT
+            ps.*,
+            {number_expr} AS order_number,
+            {name_expr} AS order_name,
+            {client_expr} AS client_name
+        FROM production_sessions ps
+        LEFT JOIN orders o
+            ON o.id = ps.order_id
+        WHERE ps.finished_at IS NOT NULL
+        ORDER BY ps.finished_at DESC
+        LIMIT 30
+        """
+    )
+
+    history = [
+        _prod_session_payload(cur, dict(row))
+        for row in cur.fetchall()
+    ]
+
+    return {
+        "orders": orders,
+        "materials": _prod_materials(cur),
+        "history": history,
+    }
+
+
+@app.on_event("startup")
+def startup_production_pro_v036():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _prod_schema(cur)
+
+        conn.commit()
+
+
+@app.get("/production-pro/board")
+def production_pro_board(
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            data = _prod_board(cur)
+
+        conn.commit()
+
+    return data
+
+
+@app.post("/production-pro/orders/{order_id}/start")
+def production_pro_start(
+    order_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _prod_schema(cur)
+
+            order = _prod_get_order(
+                cur,
+                order_id,
+            )
+
+            active = _prod_get_active_session(
+                cur,
+                order_id,
+            )
+
+            if active is not None:
+                return {
+                    "ok": True,
+                    "already_running": True,
+                    "session": _prod_session_payload(
+                        cur,
+                        active,
+                    ),
+                }
+
+            cur.execute(
+                """
+                INSERT INTO production_sessions (
+                    order_id
+                )
+                VALUES (%s)
+                RETURNING *
+                """,
+                (order_id,),
+            )
+
+            session = dict(cur.fetchone())
+
+            columns = _prod_columns(cur, "orders")
+
+            if "status" in columns:
+                current_status = str(order.get("status") or "")
+
+                if current_status not in (
+                    "Gotowe",
+                    "Zrealizowane",
+                    "Anulowane",
+                ):
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET status = 'Produkcja'
+                        WHERE id = %s
+                        """,
+                        (order_id,),
+                    )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "already_running": False,
+        "session": {
+            **session,
+            "duration_seconds": 0,
+            "material_usage": [],
+            "material_cost_live": 0.0,
+        },
+    }
+
+
+@app.post("/production-pro/orders/{order_id}/material")
+def production_pro_add_material(
+    order_id: int,
+    data: ProductionMaterialUseIn,
+    user: dict = Depends(get_current_user),
+):
+    if data.used_length_m <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Zużycie materiału musi być większe od 0",
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _prod_schema(cur)
+
+            _prod_get_order(
+                cur,
+                order_id,
+            )
+
+            session = _prod_get_active_session(
+                cur,
+                order_id,
+            )
+
+            if session is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Najpierw rozpocznij produkcję",
+                )
+
+            columns = _prod_columns(cur, "materials")
+
+            wanted = [
+                candidate
+                for candidate in (
+                    "id",
+                    "name",
+                    "color_name",
+                    "color",
+                    "stock_length_m",
+                    "price",
+                    "purchase_price",
+                    "roll_price",
+                    "cost",
+                    "roll_length_m",
+                    "length_m",
+                    "roll_length",
+                )
+                if candidate in columns
+            ]
+
+            if "stock_length_m" not in columns:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Materiały nie mają stanu w metrach",
+                )
+
+            cur.execute(
+                f"""
+                SELECT {", ".join(wanted)}
+                FROM materials
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (data.material_id,),
+            )
+
+            raw = cur.fetchone()
+
+            if raw is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nie znaleziono materiału",
+                )
+
+            material = dict(raw)
+
+            stock = float(
+                material.get("stock_length_m")
+                or 0
+            )
+
+            if stock + 1e-9 < data.used_length_m:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Za mało materiału. Dostępne: {stock:.3f} m"
+                    ),
+                )
+
+            cost_per_m = _prod_material_price_per_m(
+                material,
+                columns,
+            )
+
+            total = round(
+                cost_per_m * data.used_length_m,
+                2,
+            )
+
+            new_stock = stock - data.used_length_m
+
+            cur.execute(
+                """
+                UPDATE materials
+                SET stock_length_m = %s
+                WHERE id = %s
+                """,
+                (
+                    new_stock,
+                    data.material_id,
+                ),
+            )
+
+            color_name = (
+                material.get("color_name")
+                or material.get("color")
+            )
+
+            cur.execute(
+                """
+                INSERT INTO production_material_usage (
+                    session_id,
+                    order_id,
+                    material_id,
+                    material_name,
+                    color_name,
+                    used_length_m,
+                    cost_per_m,
+                    cost_total
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    int(session["id"]),
+                    order_id,
+                    data.material_id,
+                    str(material.get("name") or "Materiał"),
+                    str(color_name) if color_name is not None else None,
+                    data.used_length_m,
+                    cost_per_m,
+                    total,
+                ),
+            )
+
+            usage = dict(cur.fetchone())
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "usage": usage,
+        "stock_length_m": round(
+            new_stock,
+            3,
+        ),
+    }
+
+
+@app.delete("/production-pro/material-usage/{usage_id}")
+def production_pro_undo_material(
+    usage_id: int,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _prod_schema(cur)
+
+            cur.execute(
+                """
+                SELECT *
+                FROM production_material_usage
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (usage_id,),
+            )
+
+            usage = cur.fetchone()
+
+            if usage is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nie znaleziono zużycia materiału",
+                )
+
+            usage = dict(usage)
+
+            cur.execute(
+                """
+                SELECT finished_at
+                FROM production_sessions
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (usage["session_id"],),
+            )
+
+            session = cur.fetchone()
+
+            if session is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nie znaleziono sesji produkcji",
+                )
+
+            if session.get("finished_at") is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Nie można cofnąć materiału po zakończeniu produkcji",
+                )
+
+            cur.execute(
+                """
+                UPDATE materials
+                SET stock_length_m =
+                    COALESCE(stock_length_m, 0) + %s
+                WHERE id = %s
+                """,
+                (
+                    usage["used_length_m"],
+                    usage["material_id"],
+                ),
+            )
+
+            cur.execute(
+                """
+                DELETE FROM production_material_usage
+                WHERE id = %s
+                """,
+                (usage_id,),
+            )
+
+        conn.commit()
+
+    return {"ok": True}
+
+
+@app.post("/production-pro/orders/{order_id}/finish")
+def production_pro_finish(
+    order_id: int,
+    data: ProductionFinishIn,
+    user: dict = Depends(get_current_user),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _prod_schema(cur)
+
+            order = _prod_get_order(
+                cur,
+                order_id,
+            )
+
+            session = _prod_get_active_session(
+                cur,
+                order_id,
+            )
+
+            if session is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Brak rozpoczętej produkcji",
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(cost_total), 0) AS material_cost
+                FROM production_material_usage
+                WHERE session_id = %s
+                """,
+                (int(session["id"]),),
+            )
+
+            material_cost = float(
+                (cur.fetchone() or {}).get("material_cost")
+                or 0
+            )
+
+            started_at = session.get("started_at")
+
+            now = _ProdDateTime.now(
+                started_at.tzinfo
+            )
+
+            duration_seconds = max(
+                int((now - started_at).total_seconds()),
+                0,
+            )
+
+            hourly_cost = 30.0
+
+            try:
+                _suite_schema(cur)
+
+                hourly_cost = float(
+                    _suite_setting(
+                        cur,
+                        "labor_hourly_cost",
+                        30.0,
+                    )
+                    or 30.0
+                )
+            except Exception:
+                hourly_cost = 30.0
+
+            labor_cost = round(
+                hourly_cost
+                * duration_seconds
+                / 3600,
+                2,
+            )
+
+            revenue = float(
+                order.get("price")
+                or 0
+            )
+
+            profit = round(
+                revenue
+                - material_cost
+                - labor_cost,
+                2,
+            )
+
+            cur.execute(
+                """
+                UPDATE production_sessions
+                SET
+                    finished_at = NOW(),
+                    material_cost = %s,
+                    labor_cost = %s,
+                    revenue = %s,
+                    profit = %s,
+                    notes = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    material_cost,
+                    labor_cost,
+                    revenue,
+                    profit,
+                    data.notes,
+                    int(session["id"]),
+                ),
+            )
+
+            finished = dict(cur.fetchone())
+
+            columns = _prod_columns(cur, "orders")
+
+            if "status" in columns:
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET status = 'Gotowe'
+                    WHERE id = %s
+                    """,
+                    (order_id,),
+                )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "session": finished,
+        "summary": {
+            "duration_seconds": duration_seconds,
+            "material_cost": round(material_cost, 2),
+            "labor_cost": labor_cost,
+            "revenue": round(revenue, 2),
+            "profit": profit,
+        },
+    }

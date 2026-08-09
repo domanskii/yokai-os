@@ -1264,6 +1264,13 @@ export default function ProductionPage() {
         </div>
       )}
             <ProductionPlanningOverview />
+
+      <a
+        href="/production-pro"
+        className="fixed bottom-5 right-5 z-40 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-500 px-4 py-3 text-sm font-bold text-white shadow-2xl transition hover:brightness-110"
+      >
+        Przejdź do Produkcji PRO
+      </a>
 </main>
   );
 }

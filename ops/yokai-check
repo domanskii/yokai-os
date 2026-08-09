@@ -103,6 +103,7 @@ echo "===== FRONTEND ====="
 
 check_page "Dashboard" "/"
 check_page "Produkcja" "/production"
+check_page "Produkcja PRO" "/production-pro"
 check_page "Zamówienia" "/orders"
 check_page "Biblioteka SVG" "/library"
 check_page "Kalkulator" "/calculator"
@@ -157,6 +158,7 @@ else
   fail "OpenAPI" "nie udało się pobrać"
 fi
 
+check_protected_api "Production PRO API" "/production-pro/board"
 check_protected_api "Orders API" "/orders"
 check_protected_api "SVG API" "/svg-assets"
 check_protected_api "AI Studio API" "/ai-studio/status"
