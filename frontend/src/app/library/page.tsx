@@ -98,6 +98,7 @@ const nav: NavItem[] = [
   },
   { label: "Materiały", icon: Boxes, href: "/materials" },
   { label: "Klienci", icon: Users, href: "/clients" },
+  { label: "Finanse", icon: CircleDollarSign, href: "/finance" },
   { label: "AI Studio", icon: WandSparkles, href: "/" },
   { label: "Ustawienia", icon: Settings, href: "/" },
 ];

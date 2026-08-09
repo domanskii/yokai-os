@@ -1,5 +1,7 @@
 "use client";
 
+import { ProductionPlanningOverview } from "../../components/production-planning-overview";
+
 import { ProductionSvgBadge } from "../../components/production-svg-badge";
 
 import {
@@ -161,6 +163,7 @@ const nav: NavItem[] = [
     icon: Users,
     href: "/clients",
   },
+  { label: "Finanse", icon: CircleDollarSign, href: "/finance" },
   {
     label: "AI Studio",
     icon: WandSparkles,
@@ -1257,6 +1260,7 @@ export default function ProductionPage() {
           <span>{toast}</span>
         </div>
       )}
-    </main>
+            <ProductionPlanningOverview />
+</main>
   );
 }

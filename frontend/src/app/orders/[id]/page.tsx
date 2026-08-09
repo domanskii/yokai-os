@@ -1,5 +1,7 @@
 "use client";
 
+import { OrderOperationsFinance } from "../../../components/order-operations-finance";
+
 import { OrderInstructionPdfs } from "../../../components/order-instruction-pdfs";
 
 import { OrderClientSelector } from "../../../components/order-client-selector";
@@ -544,6 +546,10 @@ export default function OrderDetailsPage() {
             <OrderClientSelector
               orderId={order.id}
               currentClientName={order.client_name}
+            />
+
+            <OrderOperationsFinance
+              orderId={order.id}
             />
 
             <OrderSvgAssets

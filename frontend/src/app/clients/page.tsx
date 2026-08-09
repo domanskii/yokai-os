@@ -117,6 +117,7 @@ const nav: NavItem[] = [
     href: "/clients",
     active: true,
   },
+  { label: "Finanse", icon: CircleDollarSign, href: "/finance" },
   { label: "AI Studio", icon: WandSparkles, href: "/" },
   { label: "Ustawienia", icon: Settings, href: "/" },
 ];

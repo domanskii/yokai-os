@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.21.0")
+app = FastAPI(title="YOKAI OS API", version="0.22.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.21.0",
+        "version": "0.22.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.21",
+                "User-Agent": "YOKAI-OS/0.22",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.21",
+            "User-Agent": "YOKAI-OS/0.22",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.21",
+            "User-Agent": "YOKAI-OS/0.22",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.21",
+            "User-Agent": "YOKAI-OS/0.22",
         },
     )
 
@@ -6674,5 +6674,1640 @@ def delete_order_instruction_pdf(
         "ok": True,
         "message": (
             "Usunięto instrukcję PDF"
+        ),
+    }
+
+# === YOKAI OPERATIONS AND FINANCE V0.22 ===
+
+from datetime import date as _OpsDate
+from datetime import timedelta as _OpsTimedelta
+from decimal import Decimal as _OpsDecimal
+
+
+class OrderPlanningUpdate(BaseModel):
+    deadline: _OpsDate | None = None
+    priority: str = Field(
+        default="normal",
+        min_length=1,
+        max_length=20,
+    )
+    production_bucket: str = Field(
+        default="later",
+        min_length=1,
+        max_length=20,
+    )
+
+
+class OrderMaterialUsageCreate(BaseModel):
+    material_id: int = Field(gt=0)
+    used_length_m: _OpsDecimal = Field(
+        gt=0,
+        le=100000,
+    )
+    notes: str | None = Field(
+        default=None,
+        max_length=1000,
+    )
+
+
+_OPS_PRIORITIES = {
+    "low",
+    "normal",
+    "high",
+    "urgent",
+}
+
+_OPS_BUCKETS = {
+    "today",
+    "tomorrow",
+    "later",
+}
+
+
+def _ops_decimal(
+    value: object,
+) -> _OpsDecimal:
+    return _OpsDecimal(
+        str(value or 0)
+    )
+
+
+def _ops_money(
+    value: object,
+) -> float:
+    return float(
+        _ops_decimal(value)
+        .quantize(
+            _OpsDecimal("0.01")
+        )
+    )
+
+
+def _ops_number(
+    value: object,
+    places: str = "0.0001",
+) -> float:
+    return float(
+        _ops_decimal(value)
+        .quantize(
+            _OpsDecimal(places)
+        )
+    )
+
+
+def _ops_is_overdue(
+    deadline: object,
+    order_status: object,
+) -> bool:
+    if deadline is None:
+        return False
+
+    if str(order_status or "") in {
+        "Zrealizowane",
+        "Anulowane",
+    }:
+        return False
+
+    if isinstance(
+        deadline,
+        _OpsDate,
+    ):
+        due = deadline
+    else:
+        try:
+            due = _OpsDate.fromisoformat(
+                str(deadline)[:10]
+            )
+        except ValueError:
+            return False
+
+    return due < _OpsDate.today()
+
+
+def _ensure_ops_schema(
+    cur,
+) -> None:
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS
+            priority TEXT
+            NOT NULL
+            DEFAULT 'normal'
+        """
+    )
+
+    cur.execute(
+        """
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS
+            production_bucket TEXT
+            NOT NULL
+            DEFAULT 'later'
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET priority = 'normal'
+        WHERE
+            priority IS NULL
+            OR priority NOT IN (
+                'low',
+                'normal',
+                'high',
+                'urgent'
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET production_bucket = 'later'
+        WHERE
+            production_bucket IS NULL
+            OR production_bucket NOT IN (
+                'today',
+                'tomorrow',
+                'later'
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS
+            order_material_usage (
+                id BIGSERIAL PRIMARY KEY,
+                order_id BIGINT NOT NULL
+                    REFERENCES orders(id)
+                    ON DELETE CASCADE,
+                material_id BIGINT
+                    REFERENCES materials(id)
+                    ON DELETE SET NULL,
+                material_name TEXT NOT NULL,
+                material_color_name TEXT,
+                material_color_code TEXT,
+                used_length_m NUMERIC(14,4)
+                    NOT NULL,
+                cost_per_linear_m NUMERIC(14,6)
+                    NOT NULL,
+                cost_snapshot NUMERIC(14,2)
+                    NOT NULL,
+                stock_deducted BOOLEAN
+                    NOT NULL
+                    DEFAULT FALSE,
+                stock_deducted_length_m
+                    NUMERIC(14,4)
+                    NOT NULL
+                    DEFAULT 0,
+                calculator_covered_length_m
+                    NUMERIC(14,4)
+                    NOT NULL
+                    DEFAULT 0,
+                notes TEXT,
+                created_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW(),
+                updated_at TIMESTAMPTZ
+                    NOT NULL
+                    DEFAULT NOW()
+            )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            order_material_usage_order_index
+        ON order_material_usage (
+            order_id,
+            created_at DESC
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            order_material_usage_material_index
+        ON order_material_usage (
+            material_id
+        )
+        """
+    )
+
+
+def _ops_latest_calculation(
+    cur,
+    order_id: int,
+) -> dict | None:
+    cur.execute(
+        """
+        SELECT
+            calculation_number,
+            material_cost,
+            labor_cost,
+            total_cost,
+            suggested_price,
+            profit,
+            stock_deducted,
+            created_at
+        FROM calculations
+        WHERE
+            order_id = %s
+            AND COALESCE(
+                is_deleted,
+                FALSE
+            ) = FALSE
+        ORDER BY
+            created_at DESC,
+            id DESC
+        LIMIT 1
+        """,
+        (order_id,),
+    )
+
+    return cur.fetchone()
+
+
+def _ops_usage_total(
+    cur,
+    order_id: int,
+) -> dict:
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) AS usage_count,
+            COALESCE(
+                SUM(cost_snapshot),
+                0
+            ) AS material_cost,
+            COALESCE(
+                SUM(used_length_m),
+                0
+            ) AS used_length_m
+        FROM order_material_usage
+        WHERE order_id = %s
+        """,
+        (order_id,),
+    )
+
+    return (
+        cur.fetchone()
+        or {
+            "usage_count": 0,
+            "material_cost": 0,
+            "used_length_m": 0,
+        }
+    )
+
+
+def _ops_order_snapshot(
+    cur,
+    order_id: int,
+) -> dict:
+    order = get_order_or_404(
+        cur,
+        order_id,
+    )
+
+    usage = _ops_usage_total(
+        cur,
+        order_id,
+    )
+
+    calculation = (
+        _ops_latest_calculation(
+            cur,
+            order_id,
+        )
+    )
+
+    usage_count = int(
+        usage.get(
+            "usage_count"
+        )
+        or 0
+    )
+
+    if usage_count > 0:
+        material_cost = _ops_decimal(
+            usage.get(
+                "material_cost"
+            )
+        )
+
+        material_cost_source = (
+            "actual_usage"
+        )
+
+    elif calculation:
+        material_cost = _ops_decimal(
+            calculation.get(
+                "material_cost"
+            )
+        )
+
+        material_cost_source = (
+            "calculation"
+        )
+
+    else:
+        material_cost = (
+            _OpsDecimal("0")
+        )
+
+        material_cost_source = (
+            "none"
+        )
+
+    labor_cost = (
+        _ops_decimal(
+            calculation.get(
+                "labor_cost"
+            )
+        )
+        if calculation
+        else _OpsDecimal("0")
+    )
+
+    revenue = _ops_decimal(
+        order.get(
+            "price"
+        )
+    )
+
+    paid = _ops_decimal(
+        order.get(
+            "paid_amount"
+        )
+    )
+
+    total_cost = (
+        material_cost
+        + labor_cost
+    )
+
+    estimated_profit = (
+        revenue
+        - total_cost
+    )
+
+    margin_percent = (
+        estimated_profit
+        / revenue
+        * _OpsDecimal("100")
+        if revenue > 0
+        else _OpsDecimal("0")
+    )
+
+    deadline = order.get(
+        "deadline"
+    )
+
+    priority = (
+        order.get(
+            "priority"
+        )
+        or "normal"
+    )
+
+    production_bucket = (
+        order.get(
+            "production_bucket"
+        )
+        or "later"
+    )
+
+    return {
+        "order_id": int(
+            order["id"]
+        ),
+        "order_number": (
+            order.get(
+                "order_number"
+            )
+            or f"YK-{order_id:05d}"
+        ),
+        "client_name": (
+            order.get(
+                "client_name"
+            )
+            or ""
+        ),
+        "order_name": (
+            order.get(
+                "name"
+            )
+            or ""
+        ),
+        "status": (
+            order.get(
+                "status"
+            )
+            or ""
+        ),
+        "deadline": deadline,
+        "priority": priority,
+        "production_bucket":
+            production_bucket,
+        "is_overdue":
+            _ops_is_overdue(
+                deadline,
+                order.get(
+                    "status"
+                ),
+            ),
+        "price":
+            _ops_money(
+                revenue
+            ),
+        "paid_amount":
+            _ops_money(
+                paid
+            ),
+        "material_cost":
+            _ops_money(
+                material_cost
+            ),
+        "labor_cost":
+            _ops_money(
+                labor_cost
+            ),
+        "total_estimated_cost":
+            _ops_money(
+                total_cost
+            ),
+        "estimated_profit":
+            _ops_money(
+                estimated_profit
+            ),
+        "margin_percent":
+            _ops_number(
+                margin_percent,
+                "0.01",
+            ),
+        "material_cost_source":
+            material_cost_source,
+        "material_usage_count":
+            usage_count,
+        "used_length_m":
+            _ops_number(
+                usage.get(
+                    "used_length_m"
+                ),
+                "0.0001",
+            ),
+        "calculation_number": (
+            calculation.get(
+                "calculation_number"
+            )
+            if calculation
+            else None
+        ),
+    }
+
+
+def _ops_calculator_covered_length(
+    cur,
+    order_id: int,
+    material_id: int,
+) -> _OpsDecimal:
+    cur.execute(
+        """
+        SELECT
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN
+                            (item->>'used_length_m')
+                            ~ '^[0-9]+([.][0-9]+)?$'
+                        THEN
+                            (item->>'used_length_m')
+                            ::NUMERIC
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS covered_length_m
+        FROM calculations c
+        CROSS JOIN LATERAL
+            jsonb_array_elements(
+                c.material_breakdown
+            ) AS item
+        WHERE
+            c.order_id = %s
+            AND c.stock_deducted = TRUE
+            AND COALESCE(
+                c.is_deleted,
+                FALSE
+            ) = FALSE
+            AND (
+                item->>'material_id'
+            ) = %s
+        """,
+        (
+            order_id,
+            str(material_id),
+        ),
+    )
+
+    row = (
+        cur.fetchone()
+        or {}
+    )
+
+    return _ops_decimal(
+        row.get(
+            "covered_length_m"
+        )
+    )
+
+
+@app.on_event("startup")
+def startup_operations_and_finance():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+        conn.commit()
+
+
+@app.get(
+    "/orders/{order_id}/operations-finance"
+)
+def get_order_operations_finance(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            result = (
+                _ops_order_snapshot(
+                    cur,
+                    order_id,
+                )
+            )
+
+        conn.commit()
+
+    return result
+
+
+@app.patch(
+    "/orders/{order_id}/planning"
+)
+def update_order_planning(
+    order_id: int,
+    data: OrderPlanningUpdate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    priority = (
+        data.priority
+        .strip()
+        .lower()
+    )
+
+    production_bucket = (
+        data.production_bucket
+        .strip()
+        .lower()
+    )
+
+    if (
+        priority
+        not in _OPS_PRIORITIES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieprawidłowy priorytet"
+            ),
+        )
+
+    if (
+        production_bucket
+        not in _OPS_BUCKETS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieprawidłowy plan produkcji"
+            ),
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                UPDATE orders
+                SET
+                    deadline = %s,
+                    priority = %s,
+                    production_bucket = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    data.deadline,
+                    priority,
+                    production_bucket,
+                    order_id,
+                ),
+            )
+
+            result = (
+                _ops_order_snapshot(
+                    cur,
+                    order_id,
+                )
+            )
+
+        conn.commit()
+
+    return result
+
+
+@app.get(
+    "/orders/{order_id}/material-usage"
+)
+def get_order_material_usage(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    u.*,
+                    m.stock_length_m
+                        AS current_stock_length_m
+                FROM order_material_usage u
+                LEFT JOIN materials m
+                    ON m.id = u.material_id
+                WHERE u.order_id = %s
+                ORDER BY
+                    u.created_at DESC,
+                    u.id DESC
+                """,
+                (order_id,),
+            )
+
+            rows = cur.fetchall()
+
+        conn.commit()
+
+    result = []
+
+    for row in rows:
+        item = dict(row)
+
+        for field in (
+            "used_length_m",
+            "cost_per_linear_m",
+            "cost_snapshot",
+            "stock_deducted_length_m",
+            "calculator_covered_length_m",
+            "current_stock_length_m",
+        ):
+            value = item.get(
+                field
+            )
+
+            item[field] = (
+                None
+                if value is None
+                else _ops_number(
+                    value
+                )
+            )
+
+        result.append(
+            item
+        )
+
+    return result
+
+
+@app.post(
+    "/orders/{order_id}/material-usage",
+    status_code=status.HTTP_201_CREATED,
+)
+def add_order_material_usage(
+    order_id: int,
+    data: OrderMaterialUsageCreate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    used_length = _ops_decimal(
+        data.used_length_m
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM materials
+                WHERE
+                    id = %s
+                    AND is_archived = FALSE
+                FOR UPDATE
+                """,
+                (data.material_id,),
+            )
+
+            material = (
+                cur.fetchone()
+            )
+
+            if material is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono aktywnego materiału"
+                    ),
+                )
+
+            roll_length = _ops_decimal(
+                material.get(
+                    "roll_length_m"
+                )
+            )
+
+            purchase_price = _ops_decimal(
+                material.get(
+                    "purchase_price"
+                )
+            )
+
+            stock_length = _ops_decimal(
+                material.get(
+                    "stock_length_m"
+                )
+            )
+
+            if roll_length <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Materiał ma nieprawidłową długość rolki"
+                    ),
+                )
+
+            cost_per_linear_m = (
+                purchase_price
+                / roll_length
+            )
+
+            cost_snapshot = (
+                used_length
+                * cost_per_linear_m
+            )
+
+            calculator_covered = (
+                _ops_calculator_covered_length(
+                    cur,
+                    order_id,
+                    data.material_id,
+                )
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(used_length_m),
+                        0
+                    ) AS recorded_length_m
+                FROM order_material_usage
+                WHERE
+                    order_id = %s
+                    AND material_id = %s
+                """,
+                (
+                    order_id,
+                    data.material_id,
+                ),
+            )
+
+            recorded_row = (
+                cur.fetchone()
+                or {}
+            )
+
+            recorded_length = (
+                _ops_decimal(
+                    recorded_row.get(
+                        "recorded_length_m"
+                    )
+                )
+            )
+
+            remaining_covered = max(
+                calculator_covered
+                - recorded_length,
+                _OpsDecimal("0"),
+            )
+
+            covered_for_this_row = min(
+                used_length,
+                remaining_covered,
+            )
+
+            deduct_length = (
+                used_length
+                - covered_for_this_row
+            )
+
+            if (
+                deduct_length
+                > stock_length
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Za mało materiału na stanie. "
+                        f"Trzeba odjąć "
+                        f"{deduct_length.quantize(_OpsDecimal('0.01'))} m, "
+                        f"a dostępne jest "
+                        f"{stock_length.quantize(_OpsDecimal('0.01'))} m."
+                    ),
+                )
+
+            if deduct_length > 0:
+                cur.execute(
+                    """
+                    UPDATE materials
+                    SET
+                        stock_length_m =
+                            stock_length_m - %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        deduct_length,
+                        data.material_id,
+                    ),
+                )
+
+            cur.execute(
+                """
+                INSERT INTO order_material_usage (
+                    order_id,
+                    material_id,
+                    material_name,
+                    material_color_name,
+                    material_color_code,
+                    used_length_m,
+                    cost_per_linear_m,
+                    cost_snapshot,
+                    stock_deducted,
+                    stock_deducted_length_m,
+                    calculator_covered_length_m,
+                    notes
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    order_id,
+                    data.material_id,
+                    material.get(
+                        "name"
+                    )
+                    or (
+                        f"Materiał "
+                        f"#{data.material_id}"
+                    ),
+                    material.get(
+                        "color_name"
+                    ),
+                    material.get(
+                        "color_code"
+                    ),
+                    used_length,
+                    cost_per_linear_m,
+                    cost_snapshot,
+                    deduct_length > 0,
+                    deduct_length,
+                    covered_for_this_row,
+                    (
+                        data.notes.strip()
+                        if data.notes
+                        else None
+                    ),
+                ),
+            )
+
+            created = dict(
+                cur.fetchone()
+            )
+
+            cur.execute(
+                """
+                SELECT stock_length_m
+                FROM materials
+                WHERE id = %s
+                """,
+                (data.material_id,),
+            )
+
+            stock_row = (
+                cur.fetchone()
+                or {}
+            )
+
+            created[
+                "current_stock_length_m"
+            ] = stock_row.get(
+                "stock_length_m"
+            )
+
+        conn.commit()
+
+    for field in (
+        "used_length_m",
+        "cost_per_linear_m",
+        "cost_snapshot",
+        "stock_deducted_length_m",
+        "calculator_covered_length_m",
+        "current_stock_length_m",
+    ):
+        value = created.get(
+            field
+        )
+
+        created[field] = (
+            None
+            if value is None
+            else _ops_number(
+                value
+            )
+        )
+
+    if (
+        covered_for_this_row
+        >= used_length
+    ):
+        stock_note = (
+            "Stan magazynowy nie został odjęty ponownie — "
+            "to zużycie było już rozliczone przez kalkulator."
+        )
+
+    elif covered_for_this_row > 0:
+        stock_note = (
+            f"Kalkulator pokrywał "
+            f"{_ops_number(covered_for_this_row)} m. "
+            f"Ze stanu odjęto tylko "
+            f"{_ops_number(deduct_length)} m różnicy."
+        )
+
+    else:
+        stock_note = (
+            f"Ze stanu magazynowego odjęto "
+            f"{_ops_number(deduct_length)} m."
+        )
+
+    created[
+        "stock_note"
+    ] = stock_note
+
+    return created
+
+
+@app.delete(
+    "/order-material-usage/{usage_id}"
+)
+def delete_order_material_usage(
+    usage_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM order_material_usage
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (usage_id,),
+            )
+
+            usage = (
+                cur.fetchone()
+            )
+
+            if usage is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Nie znaleziono wpisu zużycia"
+                    ),
+                )
+
+            restore_length = (
+                _ops_decimal(
+                    usage.get(
+                        "stock_deducted_length_m"
+                    )
+                )
+            )
+
+            material_id = usage.get(
+                "material_id"
+            )
+
+            if (
+                material_id is not None
+                and restore_length > 0
+            ):
+                cur.execute(
+                    """
+                    UPDATE materials
+                    SET
+                        stock_length_m =
+                            stock_length_m + %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        restore_length,
+                        material_id,
+                    ),
+                )
+
+            cur.execute(
+                """
+                DELETE FROM order_material_usage
+                WHERE id = %s
+                """,
+                (usage_id,),
+            )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "restored_stock_m":
+            _ops_number(
+                restore_length
+            ),
+        "message": (
+            "Usunięto zużycie materiału"
+        ),
+    }
+
+
+@app.get(
+    "/production/planning"
+)
+def get_production_planning(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    order_number,
+                    client_name,
+                    name,
+                    status,
+                    deadline,
+                    priority,
+                    production_bucket,
+                    price,
+                    created_at
+                FROM orders
+                WHERE
+                    is_archived = FALSE
+                    AND status NOT IN (
+                        'Zrealizowane',
+                        'Anulowane'
+                    )
+                ORDER BY
+                    CASE priority
+                        WHEN 'urgent' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'normal' THEN 3
+                        WHEN 'low' THEN 4
+                        ELSE 5
+                    END,
+                    deadline NULLS LAST,
+                    created_at ASC
+                """
+            )
+
+            rows = cur.fetchall()
+
+        conn.commit()
+
+    result = []
+
+    for row in rows:
+        item = dict(row)
+
+        item[
+            "is_overdue"
+        ] = _ops_is_overdue(
+            item.get(
+                "deadline"
+            ),
+            item.get(
+                "status"
+            ),
+        )
+
+        item[
+            "price"
+        ] = _ops_money(
+            item.get(
+                "price"
+            )
+        )
+
+        result.append(
+            item
+        )
+
+    return result
+
+
+@app.get(
+    "/finance/dashboard"
+)
+def get_finance_dashboard(
+    days: int = Query(
+        default=30,
+        ge=1,
+        le=3650,
+    ),
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                WITH usage AS (
+                    SELECT
+                        order_id,
+                        COUNT(*) AS usage_count,
+                        SUM(cost_snapshot)
+                            AS actual_material_cost
+                    FROM order_material_usage
+                    GROUP BY order_id
+                ),
+                latest_calculation AS (
+                    SELECT DISTINCT ON (
+                        order_id
+                    )
+                        order_id,
+                        calculation_number,
+                        material_cost,
+                        labor_cost,
+                        total_cost,
+                        created_at
+                    FROM calculations
+                    WHERE
+                        order_id IS NOT NULL
+                        AND COALESCE(
+                            is_deleted,
+                            FALSE
+                        ) = FALSE
+                    ORDER BY
+                        order_id,
+                        created_at DESC,
+                        id DESC
+                )
+                SELECT
+                    o.id,
+                    o.order_number,
+                    o.client_name,
+                    o.name,
+                    o.status,
+                    o.price,
+                    o.paid_amount,
+                    o.deadline,
+                    o.priority,
+                    o.production_bucket,
+                    o.created_at,
+                    COALESCE(
+                        u.usage_count,
+                        0
+                    ) AS usage_count,
+                    COALESCE(
+                        u.actual_material_cost,
+                        0
+                    ) AS actual_material_cost,
+                    COALESCE(
+                        lc.material_cost,
+                        0
+                    ) AS calculated_material_cost,
+                    COALESCE(
+                        lc.labor_cost,
+                        0
+                    ) AS labor_cost,
+                    lc.calculation_number
+                FROM orders o
+                LEFT JOIN usage u
+                    ON u.order_id = o.id
+                LEFT JOIN latest_calculation lc
+                    ON lc.order_id = o.id
+                WHERE
+                    o.is_archived = FALSE
+                    AND o.created_at >=
+                        NOW()
+                        - (
+                            %s
+                            * INTERVAL '1 day'
+                        )
+                ORDER BY
+                    o.created_at DESC
+                """,
+                (days,),
+            )
+
+            rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    deadline,
+                    priority,
+                    production_bucket,
+                    status
+                FROM orders
+                WHERE
+                    is_archived = FALSE
+                    AND status NOT IN (
+                        'Zrealizowane',
+                        'Anulowane'
+                    )
+                """
+            )
+
+            active_rows = (
+                cur.fetchall()
+            )
+
+        conn.commit()
+
+    revenue = _OpsDecimal("0")
+    paid = _OpsDecimal("0")
+    material_cost = _OpsDecimal("0")
+    labor_cost = _OpsDecimal("0")
+    estimated_profit = _OpsDecimal("0")
+
+    orders = []
+
+    for row in rows:
+        item = dict(row)
+
+        row_revenue = _ops_decimal(
+            item.get(
+                "price"
+            )
+        )
+
+        row_paid = _ops_decimal(
+            item.get(
+                "paid_amount"
+            )
+        )
+
+        usage_count = int(
+            item.get(
+                "usage_count"
+            )
+            or 0
+        )
+
+        row_material = (
+            _ops_decimal(
+                item.get(
+                    "actual_material_cost"
+                )
+            )
+            if usage_count > 0
+            else _ops_decimal(
+                item.get(
+                    "calculated_material_cost"
+                )
+            )
+        )
+
+        row_labor = _ops_decimal(
+            item.get(
+                "labor_cost"
+            )
+        )
+
+        row_profit = (
+            row_revenue
+            - row_material
+            - row_labor
+        )
+
+        row_margin = (
+            row_profit
+            / row_revenue
+            * _OpsDecimal("100")
+            if row_revenue > 0
+            else _OpsDecimal("0")
+        )
+
+        revenue += row_revenue
+        paid += row_paid
+        material_cost += row_material
+        labor_cost += row_labor
+        estimated_profit += row_profit
+
+        orders.append(
+            {
+                "id": int(
+                    item["id"]
+                ),
+                "order_number": (
+                    item.get(
+                        "order_number"
+                    )
+                    or (
+                        f"YK-"
+                        f"{int(item['id']):05d}"
+                    )
+                ),
+                "client_name": (
+                    item.get(
+                        "client_name"
+                    )
+                    or ""
+                ),
+                "name": (
+                    item.get(
+                        "name"
+                    )
+                    or ""
+                ),
+                "status": (
+                    item.get(
+                        "status"
+                    )
+                    or ""
+                ),
+                "price":
+                    _ops_money(
+                        row_revenue
+                    ),
+                "paid_amount":
+                    _ops_money(
+                        row_paid
+                    ),
+                "material_cost":
+                    _ops_money(
+                        row_material
+                    ),
+                "labor_cost":
+                    _ops_money(
+                        row_labor
+                    ),
+                "estimated_profit":
+                    _ops_money(
+                        row_profit
+                    ),
+                "margin_percent":
+                    _ops_number(
+                        row_margin,
+                        "0.01",
+                    ),
+                "deadline":
+                    item.get(
+                        "deadline"
+                    ),
+                "priority": (
+                    item.get(
+                        "priority"
+                    )
+                    or "normal"
+                ),
+                "production_bucket": (
+                    item.get(
+                        "production_bucket"
+                    )
+                    or "later"
+                ),
+                "created_at":
+                    item.get(
+                        "created_at"
+                    ),
+                "cost_source": (
+                    "actual_usage"
+                    if usage_count > 0
+                    else (
+                        "calculation"
+                        if item.get(
+                            "calculation_number"
+                        )
+                        else "none"
+                    )
+                ),
+            }
+        )
+
+    overall_margin = (
+        estimated_profit
+        / revenue
+        * _OpsDecimal("100")
+        if revenue > 0
+        else _OpsDecimal("0")
+    )
+
+    planning = {
+        "today": 0,
+        "tomorrow": 0,
+        "later": 0,
+        "overdue": 0,
+        "urgent": 0,
+    }
+
+    overdue_orders = []
+
+    for row in active_rows:
+        bucket = (
+            row.get(
+                "production_bucket"
+            )
+            or "later"
+        )
+
+        if bucket not in {
+            "today",
+            "tomorrow",
+            "later",
+        }:
+            bucket = "later"
+
+        planning[
+            bucket
+        ] += 1
+
+        if (
+            row.get(
+                "priority"
+            )
+            == "urgent"
+        ):
+            planning[
+                "urgent"
+            ] += 1
+
+        if _ops_is_overdue(
+            row.get(
+                "deadline"
+            ),
+            row.get(
+                "status"
+            ),
+        ):
+            planning[
+                "overdue"
+            ] += 1
+
+            overdue_orders.append(
+                int(
+                    row["id"]
+                )
+            )
+
+    top_orders = sorted(
+        orders,
+        key=lambda item:
+            item[
+                "estimated_profit"
+            ],
+        reverse=True,
+    )[:8]
+
+    return {
+        "days": days,
+        "orders_count":
+            len(orders),
+        "revenue":
+            _ops_money(
+                revenue
+            ),
+        "paid_amount":
+            _ops_money(
+                paid
+            ),
+        "outstanding":
+            _ops_money(
+                max(
+                    revenue - paid,
+                    _OpsDecimal("0"),
+                )
+            ),
+        "material_cost":
+            _ops_money(
+                material_cost
+            ),
+        "labor_cost":
+            _ops_money(
+                labor_cost
+            ),
+        "total_estimated_cost":
+            _ops_money(
+                material_cost
+                + labor_cost
+            ),
+        "estimated_profit":
+            _ops_money(
+                estimated_profit
+            ),
+        "margin_percent":
+            _ops_number(
+                overall_margin,
+                "0.01",
+            ),
+        "planning":
+            planning,
+        "top_orders":
+            top_orders,
+        "orders":
+            orders[:50],
+        "note": (
+            "Szacowany zysk = wartość zamówień "
+            "- koszt materiałów "
+            "- koszt pracy z ostatniej kalkulacji. "
+            "Nie uwzględnia podatków."
         ),
     }

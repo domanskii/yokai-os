@@ -145,6 +145,7 @@ const nav: NavItem[] = [
     icon: Users,
     href: "/clients",
   },
+  { label: "Finanse", icon: CircleDollarSign, href: "/finance" },
   {
     label: "AI Studio",
     icon: WandSparkles,
