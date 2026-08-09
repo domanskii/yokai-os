@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.20.0")
+app = FastAPI(title="YOKAI OS API", version="0.21.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.20.0",
+        "version": "0.21.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.20",
+                "User-Agent": "YOKAI-OS/0.21",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.20",
+            "User-Agent": "YOKAI-OS/0.21",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.20",
+            "User-Agent": "YOKAI-OS/0.21",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.20",
+            "User-Agent": "YOKAI-OS/0.21",
         },
     )
 
@@ -5105,5 +5105,1574 @@ def run_bulk_operation(
             f"{action_labels[action]} "
             f"{len(changed_ids)} "
             f"{entity_config[entity]['label']}"
+        ),
+    }
+
+# === YOKAI ORDER INSTRUCTION PDFS V0.21 ===
+
+import re as _pdf_re
+import uuid as _pdf_uuid
+from datetime import datetime as _pdf_datetime
+from pathlib import Path as _PdfPath
+from xml.sax.saxutils import escape as _pdf_escape
+
+from reportlab.lib import colors as _pdf_colors
+from reportlab.lib.enums import TA_CENTER as _PDF_TA_CENTER
+from reportlab.lib.pagesizes import A4 as _PDF_A4
+from reportlab.lib.styles import ParagraphStyle as _PdfParagraphStyle
+from reportlab.lib.units import mm as _pdf_mm
+from reportlab.pdfbase import pdfmetrics as _pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont as _PdfTTFont
+from reportlab.platypus import (
+    KeepTogether as _PdfKeepTogether,
+    Paragraph as _PdfParagraph,
+    SimpleDocTemplate as _PdfSimpleDocTemplate,
+    Spacer as _PdfSpacer,
+    Table as _PdfTable,
+    TableStyle as _PdfTableStyle,
+)
+
+
+PDF_STORAGE_DIR = _PdfPath(
+    os.environ.get(
+        "PDF_STORAGE_DIR",
+        "/srv/yokai-data/pdf",
+    )
+)
+
+_PDF_FONT_REGULAR_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+]
+
+_PDF_FONT_BOLD_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+]
+
+
+def _find_pdf_font(
+    candidates: list[str],
+) -> _PdfPath:
+    for candidate in candidates:
+        path = _PdfPath(
+            candidate
+        )
+
+        if path.exists():
+            return path
+
+    raise RuntimeError(
+        "Brakuje fontów DejaVu Sans "
+        "potrzebnych do polskich znaków w PDF"
+    )
+
+_PDF_ACCENT = _pdf_colors.HexColor("#4C1D95")
+_PDF_DARK = _pdf_colors.HexColor("#15171C")
+_PDF_MUTED = _pdf_colors.HexColor("#6B7280")
+_PDF_LIGHT = _pdf_colors.HexColor("#F4F2F8")
+_PDF_BORDER = _pdf_colors.HexColor("#E8E5ED")
+
+
+class GenerateOrderInstructionPdf(BaseModel):
+    instruction_type: str = Field(
+        min_length=1,
+        max_length=30,
+    )
+    custom_title: str | None = Field(
+        default=None,
+        max_length=160,
+    )
+    custom_text: str | None = Field(
+        default=None,
+        max_length=12000,
+    )
+
+
+def _ensure_pdf_storage() -> None:
+    PDF_STORAGE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+def _register_pdf_fonts() -> None:
+    if "YokaiSans" not in _pdfmetrics.getRegisteredFontNames():
+        regular = _find_pdf_font(
+            _PDF_FONT_REGULAR_CANDIDATES
+        )
+
+        bold = _find_pdf_font(
+            _PDF_FONT_BOLD_CANDIDATES
+        )
+
+        _pdfmetrics.registerFont(
+            _PdfTTFont(
+                "YokaiSans",
+                str(regular),
+            )
+        )
+
+        _pdfmetrics.registerFont(
+            _PdfTTFont(
+                "YokaiSans-Bold",
+                str(bold),
+            )
+        )
+
+
+def _pdf_clean_filename(
+    value: str,
+) -> str:
+    value = _pdf_re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "-",
+        value.strip(),
+    )
+
+    return (
+        value.strip("-._")
+        or "yokai"
+    )
+
+
+def _instruction_catalog() -> dict:
+    common_warning = (
+        "Instrukcja ma charakter ogólny. "
+        "W przypadku nietypowej powierzchni, "
+        "świeżego lakieru, tworzyw wydzielających "
+        "gazy lub montażu w trudnych warunkach "
+        "skontaktuj się z YOKAI WRAP przed aplikacją."
+    )
+
+    return {
+        "application": {
+            "title": "Instrukcja aplikacji naklejki",
+            "subtitle": (
+                "Standardowa instrukcja dla naklejek "
+                "wycinanych ploterowo z folii samoprzylepnej."
+            ),
+            "sections": [
+                (
+                    "1. Przygotuj powierzchnię",
+                    [
+                        (
+                            "Powierzchnia powinna być gładka, "
+                            "czysta, sucha i wolna od tłuszczu, "
+                            "wosku oraz silikonu."
+                        ),
+                        (
+                            "Najbezpieczniej odtłuścić miejsce "
+                            "alkoholem izopropylowym (IPA) lub "
+                            "środkiem przeznaczonym do "
+                            "przygotowania powierzchni pod folie. "
+                            "Po czyszczeniu wytrzyj do sucha."
+                        ),
+                        (
+                            "Nie naklejaj folii na świeży lakier. "
+                            "Jeżeli powierzchnia była niedawno "
+                            "lakierowana, upewnij się, że lakier "
+                            "jest całkowicie utwardzony."
+                        ),
+                    ],
+                ),
+                (
+                    "2. Ustaw naklejkę",
+                    [
+                        (
+                            "Przyłóż naklejkę razem z papierem "
+                            "transportowym i ustaw ją dokładnie "
+                            "w docelowym miejscu."
+                        ),
+                        (
+                            "Przy większych projektach warto "
+                            "ustalić pozycję taśmą maskującą, "
+                            "zanim zaczniesz zdejmować papier "
+                            "podkładowy."
+                        ),
+                    ],
+                ),
+                (
+                    "3. Naklej",
+                    [
+                        (
+                            "Odklejaj papier podkładowy stopniowo. "
+                            "Dociskaj grafikę raklą lub miękką "
+                            "ściereczką równymi, zachodzącymi na "
+                            "siebie ruchami."
+                        ),
+                        (
+                            "Pracuj od środka na zewnątrz, żeby "
+                            "ograniczyć ryzyko pęcherzy powietrza "
+                            "i zagięć."
+                        ),
+                    ],
+                ),
+                (
+                    "4. Zdejmij papier transportowy",
+                    [
+                        (
+                            "Po dociśnięciu grafiki zdejmuj papier "
+                            "transportowy powoli, prowadząc go "
+                            "możliwie płasko względem powierzchni "
+                            "(około 180°)."
+                        ),
+                        (
+                            "Jeżeli któryś element podnosi się "
+                            "razem z transferem, cofnij papier, "
+                            "ponownie mocno dociśnij ten fragment "
+                            "i spróbuj jeszcze raz."
+                        ),
+                    ],
+                ),
+                (
+                    "5. Po aplikacji",
+                    [
+                        (
+                            "Na koniec ponownie dociśnij krawędzie "
+                            "i drobne elementy. W pierwszej dobie "
+                            "po aplikacji unikaj dużego spadku "
+                            "temperatury."
+                        ),
+                        (
+                            "Jeżeli naklejka jest narażona na wodę "
+                            "lub mycie, daj klejowi czas na "
+                            "osiągnięcie pełnej przyczepności "
+                            "przed intensywnym czyszczeniem."
+                        ),
+                    ],
+                ),
+            ],
+            "warning": common_warning,
+        },
+        "care": {
+            "title": "Pielęgnacja naklejki",
+            "subtitle": (
+                "Jak czyścić i użytkować naklejkę, "
+                "żeby nie uszkodzić krawędzi ani powierzchni."
+            ),
+            "sections": [
+                (
+                    "1. Pierwsze godziny",
+                    [
+                        (
+                            "Po aplikacji dokładnie dociśnij "
+                            "wszystkie krawędzie i drobne elementy."
+                        ),
+                        (
+                            "W pierwszej dobie unikaj dużego spadku "
+                            "temperatury i intensywnego mycia."
+                        ),
+                    ],
+                ),
+                (
+                    "2. Mycie",
+                    [
+                        (
+                            "Czyść naklejkę łagodnym środkiem "
+                            "i miękką ściereczką lub gąbką."
+                        ),
+                        (
+                            "Nie kieruj silnego strumienia "
+                            "bezpośrednio pod krawędź naklejki."
+                        ),
+                    ],
+                ),
+                (
+                    "3. Chemia i temperatura",
+                    [
+                        (
+                            "Unikaj agresywnych rozpuszczalników, "
+                            "ostrych narzędzi oraz środków "
+                            "ściernych."
+                        ),
+                        (
+                            "Jeżeli naklejka pracuje w bardzo "
+                            "wysokiej lub niskiej temperaturze, "
+                            "kontroluj stan krawędzi."
+                        ),
+                    ],
+                ),
+                (
+                    "4. Uszkodzenie",
+                    [
+                        (
+                            "Jeżeli fragment zacznie się odklejać, "
+                            "nie ciągnij go. Skontaktuj się z "
+                            "YOKAI WRAP i prześlij zdjęcie."
+                        ),
+                    ],
+                ),
+            ],
+            "warning": common_warning,
+        },
+        "social": {
+            "title": "Instrukcja naklejki Social Media",
+            "subtitle": (
+                "Montaż wieloelementowej naklejki z ikoną "
+                "i nazwą profilu."
+            ),
+            "sections": [
+                (
+                    "1. Sprawdź układ",
+                    [
+                        (
+                            "Przed odklejeniem papieru podkładowego "
+                            "przyłóż cały projekt do powierzchni "
+                            "i sprawdź poziom, odstępy oraz kierunek."
+                        ),
+                        (
+                            "Nie odrywaj pojedynczych liter ani "
+                            "elementów od papieru transportowego."
+                        ),
+                    ],
+                ),
+                (
+                    "2. Przygotuj powierzchnię",
+                    [
+                        (
+                            "Oczyść i odtłuść powierzchnię. "
+                            "Miejsce montażu musi być suche i "
+                            "wolne od wosku oraz silikonu."
+                        ),
+                    ],
+                ),
+                (
+                    "3. Naklej cały projekt",
+                    [
+                        (
+                            "Odklejaj podkład stopniowo i dociskaj "
+                            "projekt od środka na zewnątrz."
+                        ),
+                        (
+                            "Raklą dokładnie przejedź po ikonie, "
+                            "literach i cienkich elementach."
+                        ),
+                    ],
+                ),
+                (
+                    "4. Zdejmij transfer",
+                    [
+                        (
+                            "Papier transportowy zdejmuj powoli "
+                            "i możliwie płasko względem powierzchni."
+                        ),
+                        (
+                            "Jeżeli litera lub fragment logo "
+                            "podnosi się, cofnij transfer i ponownie "
+                            "mocno dociśnij ten element."
+                        ),
+                    ],
+                ),
+                (
+                    "5. Kontrola",
+                    [
+                        (
+                            "Po zdjęciu transferu sprawdź wszystkie "
+                            "krawędzie i ponownie je dociśnij."
+                        ),
+                    ],
+                ),
+            ],
+            "warning": common_warning,
+        },
+        "nfc": {
+            "title": "Instrukcja naklejki z NFC",
+            "subtitle": (
+                "Montaż i sprawdzenie naklejki z ukrytym "
+                "tagiem NFC."
+            ),
+            "sections": [
+                (
+                    "1. Sprawdź NFC przed montażem",
+                    [
+                        (
+                            "Przed trwałym przyklejeniem sprawdź, "
+                            "czy telefon poprawnie odczytuje tag "
+                            "i otwiera właściwy link."
+                        ),
+                        (
+                            "Test wykonaj także w docelowym miejscu. "
+                            "Powierzchnie metalowe mogą wymagać "
+                            "odpowiedniego typu taga NFC."
+                        ),
+                    ],
+                ),
+                (
+                    "2. Nie uszkodź taga",
+                    [
+                        (
+                            "Nie zaginaj, nie przebijaj i nie "
+                            "przecinaj miejsca, pod którym znajduje "
+                            "się tag NFC."
+                        ),
+                        (
+                            "Podczas dociskania używaj równomiernej "
+                            "siły i nie uderzaj ostrą krawędzią "
+                            "rakli bezpośrednio w tag."
+                        ),
+                    ],
+                ),
+                (
+                    "3. Naklej projekt",
+                    [
+                        (
+                            "Oczyść i odtłuść powierzchnię, ustaw "
+                            "projekt i aplikuj go tak samo jak "
+                            "standardową naklejkę z transferem."
+                        ),
+                    ],
+                ),
+                (
+                    "4. Sprawdź po aplikacji",
+                    [
+                        (
+                            "Po zakończeniu montażu ponownie "
+                            "przetestuj NFC kilkoma próbami."
+                        ),
+                        (
+                            "W telefonie przyłóż obszar anteny NFC "
+                            "do miejsca oznaczonego jako NFC "
+                            "w projekcie."
+                        ),
+                    ],
+                ),
+            ],
+            "warning": (
+                "Działanie NFC zależy również od telefonu, "
+                "położenia anteny i powierzchni montażowej. "
+                "Jeżeli odczyt jest niestabilny, skontaktuj się "
+                "z YOKAI WRAP przed dalszym montażem."
+            ),
+        },
+    }
+
+
+def _pdf_styles() -> dict:
+    base = _PdfParagraphStyle(
+        "YokaiBase",
+        fontName="YokaiSans",
+        fontSize=8.7,
+        leading=12,
+        textColor=_PDF_DARK,
+    )
+
+    return {
+        "base": base,
+        "brand": _PdfParagraphStyle(
+            "YokaiBrand",
+            parent=base,
+            fontName="YokaiSans-Bold",
+            fontSize=11,
+            leading=14,
+            textColor=_PDF_ACCENT,
+            spaceAfter=3,
+        ),
+        "title": _PdfParagraphStyle(
+            "YokaiTitle",
+            parent=base,
+            fontName="YokaiSans-Bold",
+            fontSize=19,
+            leading=22,
+            textColor=_PDF_DARK,
+            spaceAfter=4,
+        ),
+        "section": _PdfParagraphStyle(
+            "YokaiSection",
+            parent=base,
+            fontName="YokaiSans-Bold",
+            fontSize=10.8,
+            leading=13.5,
+            textColor=_PDF_ACCENT,
+            spaceBefore=3,
+            spaceAfter=4,
+        ),
+        "small": _PdfParagraphStyle(
+            "YokaiSmall",
+            parent=base,
+            fontSize=7.2,
+            leading=9.2,
+            textColor=_PDF_MUTED,
+        ),
+        "step": _PdfParagraphStyle(
+            "YokaiStep",
+            parent=base,
+            spaceAfter=3,
+        ),
+        "number": _PdfParagraphStyle(
+            "YokaiNumber",
+            parent=base,
+            fontName="YokaiSans-Bold",
+            textColor=_pdf_colors.white,
+            alignment=_PDF_TA_CENTER,
+        ),
+        "warning": _PdfParagraphStyle(
+            "YokaiWarning",
+            parent=base,
+            fontName="YokaiSans-Bold",
+            fontSize=8.3,
+            leading=11,
+        ),
+    }
+
+
+def _pdf_header_footer(
+    canvas,
+    doc,
+) -> None:
+    width, height = _PDF_A4
+
+    canvas.saveState()
+
+    canvas.setFillColor(
+        _PDF_ACCENT
+    )
+
+    canvas.rect(
+        0,
+        height - 6 * _pdf_mm,
+        width,
+        6 * _pdf_mm,
+        fill=1,
+        stroke=0,
+    )
+
+    canvas.setFillColor(
+        _PDF_MUTED
+    )
+
+    canvas.setFont(
+        "YokaiSans-Bold",
+        7.5,
+    )
+
+    canvas.drawString(
+        18 * _pdf_mm,
+        10 * _pdf_mm,
+        "YOKAI WRAP  •  yokaiwrap.pl",
+    )
+
+    canvas.drawRightString(
+        width - 18 * _pdf_mm,
+        10 * _pdf_mm,
+        f"Strona {doc.page}",
+    )
+
+    canvas.restoreState()
+
+
+def _custom_sections(
+    custom_text: str,
+) -> list:
+    raw_parts = [
+        value.strip()
+        for value in _pdf_re.split(
+            r"\n\s*\n",
+            custom_text.strip(),
+        )
+        if value.strip()
+    ]
+
+    if not raw_parts:
+        return []
+
+    sections = []
+
+    for index, part in enumerate(
+        raw_parts,
+        start=1,
+    ):
+        lines = [
+            line.strip()
+            for line in part.splitlines()
+            if line.strip()
+        ]
+
+        if not lines:
+            continue
+
+        heading = (
+            f"{index}. {lines[0]}"
+            if len(lines) > 1
+            else f"{index}. Informacja"
+        )
+
+        items = (
+            lines[1:]
+            if len(lines) > 1
+            else lines
+        )
+
+        sections.append(
+            (
+                heading,
+                items,
+            )
+        )
+
+    return sections
+
+
+def _build_order_instruction_pdf(
+    output_path: _PdfPath,
+    order: dict,
+    instruction_type: str,
+    custom_title: str | None,
+    custom_text: str | None,
+) -> dict:
+    _register_pdf_fonts()
+
+    catalog = _instruction_catalog()
+
+    if instruction_type == "custom":
+        title = (
+            (custom_title or "").strip()
+            or "Instrukcja dla klienta"
+        )
+
+        text = (
+            custom_text
+            or ""
+        ).strip()
+
+        if not text:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Własna instrukcja wymaga treści"
+                ),
+            )
+
+        definition = {
+            "title": title,
+            "subtitle": (
+                "Indywidualna instrukcja przygotowana "
+                "dla tego zamówienia."
+            ),
+            "sections": _custom_sections(
+                text
+            ),
+            "warning": (
+                "W razie wątpliwości skontaktuj się "
+                "z YOKAI WRAP przed wykonaniem czynności "
+                "opisanych w instrukcji."
+            ),
+        }
+
+    else:
+        definition = catalog.get(
+            instruction_type
+        )
+
+        if definition is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Nieobsługiwany typ instrukcji"
+                ),
+            )
+
+    styles = _pdf_styles()
+
+    doc = _PdfSimpleDocTemplate(
+        str(output_path),
+        pagesize=_PDF_A4,
+        rightMargin=18 * _pdf_mm,
+        leftMargin=18 * _pdf_mm,
+        topMargin=17 * _pdf_mm,
+        bottomMargin=16 * _pdf_mm,
+        title=definition["title"],
+        author="YOKAI WRAP",
+        subject=(
+            f"Instrukcja do zamówienia "
+            f"{order.get('order_number') or order.get('id')}"
+        ),
+    )
+
+    story = [
+        _PdfParagraph(
+            "YOKAI WRAP",
+            styles["brand"],
+        ),
+        _PdfParagraph(
+            _pdf_escape(
+                definition["title"]
+            ),
+            styles["title"],
+        ),
+        _PdfParagraph(
+            _pdf_escape(
+                definition["subtitle"]
+            ),
+            styles["small"],
+        ),
+        _PdfSpacer(
+            1,
+            4 * _pdf_mm,
+        ),
+    ]
+
+    order_number = (
+        order.get("order_number")
+        or f"#{order.get('id')}"
+    )
+
+    client_name = (
+        order.get("client_name")
+        or "Brak danych"
+    )
+
+    order_name = (
+        order.get("name")
+        or "Zamówienie"
+    )
+
+    meta = _PdfTable(
+        [
+            [
+                _PdfParagraph(
+                    (
+                        "<b>Zamówienie</b><br/>"
+                        + _pdf_escape(
+                            str(order_number)
+                        )
+                    ),
+                    styles["base"],
+                ),
+                _PdfParagraph(
+                    (
+                        "<b>Klient</b><br/>"
+                        + _pdf_escape(
+                            str(client_name)
+                        )
+                    ),
+                    styles["base"],
+                ),
+                _PdfParagraph(
+                    (
+                        "<b>Produkt</b><br/>"
+                        + _pdf_escape(
+                            str(order_name)
+                        )
+                    ),
+                    styles["base"],
+                ),
+            ]
+        ],
+        colWidths=[
+            55 * _pdf_mm,
+            55 * _pdf_mm,
+            64 * _pdf_mm,
+        ],
+    )
+
+    meta.setStyle(
+        _PdfTableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, -1),
+                    _PDF_LIGHT,
+                ),
+                (
+                    "BOX",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    _PDF_BORDER,
+                ),
+                (
+                    "INNERGRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    _PDF_BORDER,
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "TOP",
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+            ]
+        )
+    )
+
+    story.extend(
+        [
+            meta,
+            _PdfSpacer(
+                1,
+                4 * _pdf_mm,
+            ),
+        ]
+    )
+
+    for (
+        section_title,
+        items,
+    ) in definition["sections"]:
+        block = [
+            _PdfParagraph(
+                _pdf_escape(
+                    section_title
+                ),
+                styles["section"],
+            )
+        ]
+
+        for (
+            item_index,
+            item,
+        ) in enumerate(
+            items,
+            start=1,
+        ):
+            row = _PdfTable(
+                [
+                    [
+                        _PdfParagraph(
+                            str(
+                                item_index
+                            ),
+                            styles["number"],
+                        ),
+                        _PdfParagraph(
+                            _pdf_escape(
+                                str(item)
+                            ),
+                            styles["step"],
+                        ),
+                    ]
+                ],
+                colWidths=[
+                    8 * _pdf_mm,
+                    163 * _pdf_mm,
+                ],
+            )
+
+            row.setStyle(
+                _PdfTableStyle(
+                    [
+                        (
+                            "BACKGROUND",
+                            (0, 0),
+                            (0, 0),
+                            _PDF_ACCENT,
+                        ),
+                        (
+                            "VALIGN",
+                            (0, 0),
+                            (-1, -1),
+                            "TOP",
+                        ),
+                        (
+                            "LEFTPADDING",
+                            (0, 0),
+                            (0, 0),
+                            0,
+                        ),
+                        (
+                            "RIGHTPADDING",
+                            (0, 0),
+                            (0, 0),
+                            0,
+                        ),
+                        (
+                            "TOPPADDING",
+                            (0, 0),
+                            (0, 0),
+                            3,
+                        ),
+                        (
+                            "BOTTOMPADDING",
+                            (0, 0),
+                            (0, 0),
+                            3,
+                        ),
+                        (
+                            "LEFTPADDING",
+                            (1, 0),
+                            (1, 0),
+                            8,
+                        ),
+                        (
+                            "RIGHTPADDING",
+                            (1, 0),
+                            (1, 0),
+                            0,
+                        ),
+                        (
+                            "TOPPADDING",
+                            (1, 0),
+                            (1, 0),
+                            0,
+                        ),
+                        (
+                            "BOTTOMPADDING",
+                            (1, 0),
+                            (1, 0),
+                            1,
+                        ),
+                    ]
+                )
+            )
+
+            block.extend(
+                [
+                    row,
+                    _PdfSpacer(
+                        1,
+                        1 * _pdf_mm,
+                    ),
+                ]
+            )
+
+        story.append(
+            _PdfKeepTogether(
+                block
+            )
+        )
+
+        story.append(
+            _PdfSpacer(
+                1,
+                1 * _pdf_mm,
+            )
+        )
+
+    warning = _PdfTable(
+        [
+            [
+                _PdfParagraph(
+                    "WAŻNE",
+                    styles["warning"],
+                ),
+                _PdfParagraph(
+                    _pdf_escape(
+                        definition["warning"]
+                    ),
+                    styles["base"],
+                ),
+            ]
+        ],
+        colWidths=[
+            27 * _pdf_mm,
+            144 * _pdf_mm,
+        ],
+    )
+
+    warning.setStyle(
+        _PdfTableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (0, 0),
+                    _PDF_ACCENT,
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (0, 0),
+                    _pdf_colors.white,
+                ),
+                (
+                    "BACKGROUND",
+                    (1, 0),
+                    (1, 0),
+                    _PDF_LIGHT,
+                ),
+                (
+                    "BOX",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    _PDF_BORDER,
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+            ]
+        )
+    )
+
+    story.extend(
+        [
+            _PdfSpacer(
+                1,
+                2 * _pdf_mm,
+            ),
+            warning,
+            _PdfSpacer(
+                1,
+                2 * _pdf_mm,
+            ),
+            _PdfParagraph(
+                (
+                    "Wygenerowano: "
+                    + _pdf_datetime.now().strftime(
+                        "%d.%m.%Y %H:%M"
+                    )
+                    + " • YOKAI OS"
+                ),
+                styles["small"],
+            ),
+        ]
+    )
+
+    doc.build(
+        story,
+        onFirstPage=_pdf_header_footer,
+        onLaterPages=_pdf_header_footer,
+    )
+
+    return {
+        "title": definition["title"],
+    }
+
+
+def _instruction_pdf_result(
+    row: dict,
+) -> dict:
+    result = dict(row)
+
+    result["file_size"] = int(
+        result.get("file_size")
+        or 0
+    )
+
+    result["version"] = int(
+        result.get("version")
+        or 1
+    )
+
+    return result
+
+
+def _get_instruction_pdf_or_404(
+    cur,
+    pdf_id: int,
+) -> dict:
+    cur.execute(
+        """
+        SELECT
+            p.*,
+            o.order_number,
+            o.client_name,
+            o.name AS order_name
+        FROM order_instruction_pdfs p
+        JOIN orders o
+            ON o.id = p.order_id
+        WHERE p.id = %s
+        """,
+        (pdf_id,),
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Nie znaleziono instrukcji PDF"
+            ),
+        )
+
+    return row
+
+
+@app.on_event("startup")
+def startup_order_instruction_pdfs():
+    _ensure_pdf_storage()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                order_instruction_pdfs (
+                    id BIGSERIAL PRIMARY KEY,
+                    order_id BIGINT NOT NULL
+                        REFERENCES orders(id)
+                        ON DELETE CASCADE,
+                    instruction_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    version INTEGER NOT NULL
+                        DEFAULT 1,
+                    stored_filename TEXT UNIQUE
+                        NOT NULL,
+                    file_path TEXT UNIQUE
+                        NOT NULL,
+                    file_size BIGINT NOT NULL
+                        DEFAULT 0,
+                    custom_title TEXT,
+                    custom_text TEXT,
+                    created_at TIMESTAMPTZ
+                        NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                order_instruction_pdfs_order_index
+                ON order_instruction_pdfs (
+                    order_id,
+                    created_at DESC
+                )
+                """
+            )
+
+        conn.commit()
+
+
+@app.get(
+    "/orders/{order_id}/instructions"
+)
+def get_order_instruction_pdfs(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    p.*,
+                    o.order_number,
+                    o.client_name,
+                    o.name AS order_name
+                FROM order_instruction_pdfs p
+                JOIN orders o
+                    ON o.id = p.order_id
+                WHERE p.order_id = %s
+                ORDER BY
+                    p.created_at DESC,
+                    p.id DESC
+                """,
+                (order_id,),
+            )
+
+            rows = cur.fetchall()
+
+    return [
+        _instruction_pdf_result(
+            row
+        )
+        for row in rows
+    ]
+
+
+@app.post(
+    "/orders/{order_id}/instructions/generate",
+    status_code=status.HTTP_201_CREATED,
+)
+def generate_order_instruction_pdf(
+    order_id: int,
+    data: GenerateOrderInstructionPdf,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    instruction_type = (
+        data.instruction_type
+        .strip()
+        .lower()
+    )
+
+    allowed = {
+        "application",
+        "care",
+        "social",
+        "nfc",
+        "custom",
+    }
+
+    if instruction_type not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieobsługiwany typ instrukcji"
+            ),
+        )
+
+    custom_title = (
+        data.custom_title.strip()
+        if data.custom_title
+        else None
+    )
+
+    custom_text = (
+        data.custom_text.strip()
+        if data.custom_text
+        else None
+    )
+
+    if (
+        instruction_type == "custom"
+        and not custom_text
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Wpisz treść własnej instrukcji"
+            ),
+        )
+
+    _ensure_pdf_storage()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            order = get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        MAX(version),
+                        0
+                    ) + 1 AS next_version
+                FROM order_instruction_pdfs
+                WHERE
+                    order_id = %s
+                    AND instruction_type = %s
+                """,
+                (
+                    order_id,
+                    instruction_type,
+                ),
+            )
+
+            version_row = (
+                cur.fetchone()
+                or {}
+            )
+
+            version = int(
+                version_row.get(
+                    "next_version"
+                )
+                or 1
+            )
+
+            order_number = (
+                order.get(
+                    "order_number"
+                )
+                or f"order-{order_id}"
+            )
+
+            safe_order = (
+                _pdf_clean_filename(
+                    str(order_number)
+                )
+            )
+
+            unique = (
+                _pdf_uuid.uuid4()
+                .hex[:8]
+            )
+
+            stored_filename = (
+                f"{safe_order}-"
+                f"{instruction_type}-"
+                f"v{version}-"
+                f"{unique}.pdf"
+            )
+
+            output_path = (
+                PDF_STORAGE_DIR
+                / stored_filename
+            )
+
+            try:
+                generated = (
+                    _build_order_instruction_pdf(
+                        output_path,
+                        order,
+                        instruction_type,
+                        custom_title,
+                        custom_text,
+                    )
+                )
+
+                file_size = (
+                    output_path.stat()
+                    .st_size
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO
+                        order_instruction_pdfs (
+                            order_id,
+                            instruction_type,
+                            title,
+                            version,
+                            stored_filename,
+                            file_path,
+                            file_size,
+                            custom_title,
+                            custom_text
+                        )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        order_id,
+                        instruction_type,
+                        generated["title"],
+                        version,
+                        stored_filename,
+                        str(output_path),
+                        file_size,
+                        custom_title,
+                        custom_text,
+                    ),
+                )
+
+                inserted = cur.fetchone()
+
+                row = (
+                    _get_instruction_pdf_or_404(
+                        cur,
+                        inserted["id"],
+                    )
+                )
+
+                conn.commit()
+
+            except HTTPException:
+                conn.rollback()
+
+                if output_path.exists():
+                    output_path.unlink(
+                        missing_ok=True
+                    )
+
+                raise
+
+            except Exception as exc:
+                conn.rollback()
+
+                if output_path.exists():
+                    output_path.unlink(
+                        missing_ok=True
+                    )
+
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Nie udało się wygenerować PDF"
+                    ),
+                ) from exc
+
+    return _instruction_pdf_result(
+        row
+    )
+
+
+@app.get(
+    "/order-instructions/{pdf_id}/file"
+)
+def get_order_instruction_pdf_file(
+    pdf_id: int,
+    download: bool = Query(
+        default=False
+    ),
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            row = (
+                _get_instruction_pdf_or_404(
+                    cur,
+                    pdf_id,
+                )
+            )
+
+    path = _PdfPath(
+        row["file_path"]
+    )
+
+    try:
+        resolved = (
+            path.resolve()
+        )
+
+        storage = (
+            PDF_STORAGE_DIR
+            .resolve()
+        )
+
+        resolved.relative_to(
+            storage
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieprawidłowa ścieżka pliku PDF"
+            ),
+        ) from exc
+
+    if not resolved.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Plik PDF nie istnieje na dysku"
+            ),
+        )
+
+    disposition = (
+        "attachment"
+        if download
+        else "inline"
+    )
+
+    filename = (
+        row["stored_filename"]
+    )
+
+    return FileResponse(
+        path=str(
+            resolved
+        ),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'{disposition}; '
+                f'filename="{filename}"'
+            )
+        },
+    )
+
+
+@app.delete(
+    "/order-instructions/{pdf_id}"
+)
+def delete_order_instruction_pdf(
+    pdf_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            row = (
+                _get_instruction_pdf_or_404(
+                    cur,
+                    pdf_id,
+                )
+            )
+
+            path = _PdfPath(
+                row["file_path"]
+            )
+
+            cur.execute(
+                """
+                DELETE FROM
+                    order_instruction_pdfs
+                WHERE id = %s
+                """,
+                (pdf_id,),
+            )
+
+        conn.commit()
+
+    try:
+        resolved = path.resolve()
+        storage = (
+            PDF_STORAGE_DIR.resolve()
+        )
+
+        resolved.relative_to(
+            storage
+        )
+
+        resolved.unlink(
+            missing_ok=True
+        )
+
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "message": (
+            "Usunięto instrukcję PDF"
         ),
     }

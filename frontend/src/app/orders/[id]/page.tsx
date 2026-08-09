@@ -1,5 +1,7 @@
 "use client";
 
+import { OrderInstructionPdfs } from "../../../components/order-instruction-pdfs";
+
 import { OrderClientSelector } from "../../../components/order-client-selector";
 
 import { OrderSvgAssets } from "../../../components/order-svg-assets";
@@ -548,6 +550,15 @@ export default function OrderDetailsPage() {
               orderId={order.id}
               clientName={order.client_name}
             />
+
+            <OrderInstructionPdfs
+              orderId={order.id}
+              orderNumber={order.order_number}
+              clientName={order.client_name}
+              orderName={order.name}
+            />
+
+
 
             {details ? (
               <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_.85fr]">

@@ -30,6 +30,7 @@
 
     volumes:
       - /srv/yokai-data/svg:/srv/yokai-data/svg
+      - /srv/yokai-data/pdf:/srv/yokai-data/pdf
   frontend:
     build:
       context: ./frontend
