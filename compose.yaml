@@ -31,6 +31,7 @@
     volumes:
       - /srv/yokai-data/svg:/srv/yokai-data/svg
       - /srv/yokai-data/pdf:/srv/yokai-data/pdf
+      - /srv/yokai-data/ai:/srv/yokai-data/ai
   frontend:
     build:
       context: ./frontend

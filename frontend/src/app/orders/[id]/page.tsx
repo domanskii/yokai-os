@@ -1,5 +1,7 @@
 "use client";
 
+import { OrderAiProjects } from "../../../components/order-ai-projects";
+
 import { OrderWooAutomation } from "../../../components/order-woo-automation";
 
 import { OrderWorkflow } from "../../../components/order-workflow";
@@ -561,6 +563,10 @@ export default function OrderDetailsPage() {
             />
 
             <OrderWooAutomation
+              orderId={order.id}
+            />
+
+            <OrderAiProjects
               orderId={order.id}
             />
 

@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.26.0")
+app = FastAPI(title="YOKAI OS API", version="0.28.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.26.0",
+        "version": "0.28.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.26",
+                "User-Agent": "YOKAI-OS/0.28",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.26",
+            "User-Agent": "YOKAI-OS/0.28",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.26",
+            "User-Agent": "YOKAI-OS/0.28",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.26",
+            "User-Agent": "YOKAI-OS/0.28",
         },
     )
 
@@ -11225,7 +11225,7 @@ def _woo_api(path: str, params: dict | None = None):
         headers={
             "Authorization": f"Basic {token}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.26",
+            "User-Agent": "YOKAI-OS/0.28",
         },
         method="GET",
     )
@@ -12329,3 +12329,677 @@ def woo_automation_status(
         "changes_24h": int(recent.get("changes_24h") or 0),
         "interval_seconds": 600,
     }
+
+# === YOKAI AI STUDIO V0.28 ===
+
+import base64 as _aib64
+import json as _aijson
+import mimetypes as _aimime
+import re as _aire
+import shutil as _aishutil
+import urllib.error as _aierr
+import urllib.request as _aireq
+import uuid as _aiuuid
+from pathlib import Path as _AIPath
+from fastapi import File as _AIFile, UploadFile as _AIUploadFile
+
+AI_ROOT = _AIPath(os.environ.get("AI_STORAGE_DIR", "/srv/yokai-data/ai"))
+AI_REFS = AI_ROOT / "references"
+AI_OUT = AI_ROOT / "generated"
+AI_SVG = AI_ROOT / "svg"
+AI_KEY_FILE = AI_ROOT / "openai-api-key"
+AI_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2"
+
+class AIProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    project_type: str = Field(default="graphic", min_length=1, max_length=30)
+    brief: str = Field(min_length=1, max_length=12000)
+    color_count: int = Field(default=2, ge=1, le=4)
+    text_content: str | None = Field(default=None, max_length=1000)
+    notes: str | None = Field(default=None, max_length=4000)
+    order_id: int | None = Field(default=None, ge=1)
+
+class AIGenerateIn(BaseModel):
+    revision: str | None = Field(default=None, max_length=6000)
+    quality: str = Field(default="low", max_length=20)
+    size: str = Field(default="1024x1024", max_length=30)
+
+def _ai_dirs():
+    for p in (AI_ROOT, AI_REFS, AI_OUT, AI_SVG):
+        p.mkdir(parents=True, exist_ok=True)
+
+def _ai_key():
+    value = os.environ.get("OPENAI_API_KEY", "").strip()
+    if value:
+        return value
+    try:
+        if AI_KEY_FILE.exists():
+            return AI_KEY_FILE.read_text(encoding="utf-8").strip() or None
+    except Exception:
+        pass
+    return None
+
+def _ai_schema(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_projects (
+            id BIGSERIAL PRIMARY KEY,
+            project_number TEXT UNIQUE,
+            order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL,
+            name TEXT NOT NULL,
+            project_type TEXT NOT NULL,
+            brief TEXT NOT NULL,
+            color_count INTEGER NOT NULL DEFAULT 2,
+            text_content TEXT,
+            notes TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_project_references (
+            id BIGSERIAL PRIMARY KEY,
+            project_id BIGINT NOT NULL REFERENCES ai_projects(id) ON DELETE CASCADE,
+            original_filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            file_size BIGINT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_project_versions (
+            id BIGSERIAL PRIMARY KEY,
+            project_id BIGINT NOT NULL REFERENCES ai_projects(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL,
+            version_type TEXT NOT NULL,
+            prompt TEXT,
+            model TEXT,
+            quality TEXT,
+            size TEXT,
+            image_path TEXT,
+            svg_path TEXT,
+            original_filename TEXT,
+            is_approved BOOLEAN NOT NULL DEFAULT FALSE,
+            svg_asset_id BIGINT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(project_id, version)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS ai_projects_order_idx ON ai_projects(order_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ai_versions_project_idx ON ai_project_versions(project_id, version DESC)")
+
+def _ai_project(cur, project_id):
+    cur.execute("""
+        SELECT p.*, o.order_number, o.client_name, o.name AS order_name
+        FROM ai_projects p
+        LEFT JOIN orders o ON o.id=p.order_id
+        WHERE p.id=%s
+    """, (project_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Nie znaleziono projektu AI")
+    return dict(row)
+
+def _ai_next_version(cur, project_id):
+    cur.execute("SELECT COALESCE(MAX(version),0)+1 AS v FROM ai_project_versions WHERE project_id=%s", (project_id,))
+    return int((cur.fetchone() or {}).get("v") or 1)
+
+def _ai_prompt(project, revision=None):
+    kind = {
+        "lettering": "Typography / lettering decal. Make letters large, readable and cutter-friendly.",
+        "logo": "Compact logo-like decal with a strong silhouette and clean negative space.",
+        "social": "Social-media decal with icon and handle/name in a clean balanced layout.",
+        "graphic": "Bold simplified decal illustration with a clear silhouette.",
+        "custom": "Follow the brief while preserving vinyl-cutter constraints.",
+    }.get(str(project.get("project_type") or "graphic"), "Follow the brief.")
+    text = str(project.get("text_content") or "").strip()
+    notes = str(project.get("notes") or "").strip()
+    parts = [
+        "Create a production-oriented concept for YOKAI WRAP, a plotter-cut vinyl sticker business.",
+        kind,
+        f"Customer brief: {project.get('brief') or ''}",
+        f"Use at most {int(project.get('color_count') or 2)} solid vinyl colors.",
+        "STRICT PRODUCTION RULES: flat solid fills only; no gradients; no shadows; no glow; no photographic textures; no halftones; no tiny isolated specks; no mockup or background. Use clean closed silhouettes, smooth plotter-friendly curves, strong negative space, clear separation between color layers, and avoid fragile micro-details.",
+        "Transparent background. Show only the sticker artwork, centered with empty space around it.",
+    ]
+    if text:
+        parts.append(f'Required text exactly: "{text}". Do not invent any other wording.')
+    else:
+        parts.append("Do not add arbitrary text, letters, numbers or watermarks.")
+    if notes:
+        parts.append(f"Production notes: {notes}")
+    if revision:
+        parts.append(f"Requested revision: {revision}")
+    parts.append("If reference images are supplied, use them as visual references while keeping all cutter-production restrictions.")
+    return "\n\n".join(parts)[:30000]
+
+def _ai_http_json(endpoint, payload):
+    key = _ai_key()
+    if not key:
+        raise RuntimeError("Brakuje klucza OpenAI API")
+    request = _aireq.Request(
+        "https://api.openai.com" + endpoint,
+        data=_aijson.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "YOKAI-OS/0.28",
+        },
+        method="POST",
+    )
+    try:
+        with _aireq.urlopen(request, timeout=300) as response:
+            return _aijson.loads(response.read().decode("utf-8"))
+    except _aierr.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:700]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"OpenAI API HTTP {exc.code}: {detail}") from exc
+    except _aierr.URLError as exc:
+        raise RuntimeError("Brak połączenia z OpenAI API") from exc
+
+def _ai_multipart(fields, files):
+    boundary = "----Yokai" + _aiuuid.uuid4().hex
+    chunks = []
+    for key, value in fields.items():
+        chunks += [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ]
+    for filename, mime, content in files:
+        chunks += [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="image[]"; filename="{filename}"\r\n'.encode(),
+            f"Content-Type: {mime}\r\n\r\n".encode(),
+            content,
+            b"\r\n",
+        ]
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), boundary
+
+def _ai_generate(prompt, refs, quality, size):
+    key = _ai_key()
+    if not key:
+        raise RuntimeError("Brakuje klucza OpenAI API")
+    if not refs:
+        return _ai_http_json("/v1/images/generations", {
+            "model": AI_MODEL,
+            "prompt": prompt,
+            "size": size,
+            "quality": quality,
+            "background": "transparent",
+            "output_format": "png",
+            "n": 1,
+        })
+    files = []
+    for ref in refs[:16]:
+        path = _AIPath(str(ref["file_path"]))
+        if path.exists():
+            files.append((
+                ref.get("original_filename") or path.name,
+                ref.get("mime_type") or _aimime.guess_type(path.name)[0] or "image/png",
+                path.read_bytes(),
+            ))
+    body, boundary = _ai_multipart({
+        "model": AI_MODEL,
+        "prompt": prompt,
+        "size": size,
+        "quality": quality,
+        "background": "transparent",
+        "output_format": "png",
+    }, files)
+    request = _aireq.Request(
+        "https://api.openai.com/v1/images/edits",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+            "User-Agent": "YOKAI-OS/0.28",
+        },
+        method="POST",
+    )
+    try:
+        with _aireq.urlopen(request, timeout=360) as response:
+            return _aijson.loads(response.read().decode("utf-8"))
+    except _aierr.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:700]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"OpenAI API HTTP {exc.code}: {detail}") from exc
+    except _aierr.URLError as exc:
+        raise RuntimeError("Brak połączenia z OpenAI API") from exc
+
+def _ai_image_bytes(response):
+    data = response.get("data")
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict) or not data[0].get("b64_json"):
+        raise RuntimeError("OpenAI API nie zwróciło obrazu")
+    return _aib64.b64decode(data[0]["b64_json"])
+
+def _ai_svg_ok(content):
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="SVG może mieć maksymalnie 20 MB")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="SVG musi być zapisany jako UTF-8") from exc
+    low = text.lower()
+    if "<svg" not in low:
+        raise HTTPException(status_code=400, detail="Plik nie wygląda jak SVG")
+    if any(x in low for x in ("<script", "javascript:", "<iframe", "<object", "<embed")):
+        raise HTTPException(status_code=400, detail="SVG zawiera niedozwolone elementy")
+    if "href=\"http" in low or "href='http" in low:
+        raise HTTPException(status_code=400, detail="SVG nie może pobierać zewnętrznych zasobów")
+    return text
+
+def _ai_library_insert(cur, project, version):
+    source = _AIPath(str(version["svg_path"]))
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="Brak pliku SVG")
+    data = source.read_bytes()
+    _ai_svg_ok(data)
+    target_dir = _AIPath("/srv/yokai-data/svg")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / ("ai-" + _aiuuid.uuid4().hex + ".svg")
+    target.write_bytes(data)
+
+    cur.execute("""
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='svg_assets'
+        ORDER BY ordinal_position
+    """)
+    meta = [dict(x) for x in cur.fetchall()]
+    if not meta:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Nie znaleziono Biblioteki SVG")
+
+    client_name = None
+    if project.get("order_id"):
+        cur.execute("SELECT client_name FROM orders WHERE id=%s", (project["order_id"],))
+        order = cur.fetchone()
+        client_name = order.get("client_name") if order else None
+
+    known = {
+        "asset_number": "AI-" + _aiuuid.uuid4().hex[:10].upper(),
+        "svg_number": "AI-" + _aiuuid.uuid4().hex[:10].upper(),
+        "name": project.get("name") or "Projekt AI",
+        "title": project.get("name") or "Projekt AI",
+        "original_filename": version.get("original_filename") or source.name,
+        "stored_filename": target.name,
+        "filename": target.name,
+        "file_name": target.name,
+        "file_path": str(target),
+        "path": str(target),
+        "mime_type": "image/svg+xml",
+        "category": "AI Studio",
+        "client_name": client_name,
+        "client": client_name,
+        "order_id": project.get("order_id"),
+        "version": str(version.get("version") or 1),
+        "notes": f"AI Studio {project.get('project_number')} v{version.get('version')}",
+        "source": "AI Studio",
+        "uploaded_by": "AI Studio",
+        "is_archived": False,
+        "archived": False,
+        "is_production_ready": True,
+        "production_ready": True,
+        "file_size": len(data),
+        "size_bytes": len(data),
+    }
+    cols, vals = [], []
+    for col in meta:
+        name = str(col["column_name"])
+        if name == "id":
+            continue
+        if name in ("created_at", "updated_at") and col.get("column_default"):
+            continue
+        if name == "tags":
+            if col.get("data_type") == "ARRAY":
+                value = ["AI Studio", "produkcja"]
+            elif col.get("data_type") in ("json", "jsonb"):
+                value = Jsonb(["AI Studio", "produkcja"])
+            else:
+                value = "AI Studio, produkcja"
+        elif name in known:
+            value = known[name]
+        elif col.get("is_nullable") == "YES" or col.get("column_default"):
+            continue
+        else:
+            typ = str(col.get("data_type") or "")
+            if typ in ("text", "character varying", "character"):
+                value = ""
+            elif typ in ("integer", "bigint", "smallint", "numeric", "double precision", "real"):
+                value = 0
+            elif typ == "boolean":
+                value = False
+            else:
+                continue
+        cols.append(name)
+        vals.append(value)
+    try:
+        cur.execute(
+            f"INSERT INTO svg_assets ({', '.join(cols)}) VALUES ({', '.join(['%s']*len(cols))}) RETURNING id",
+            tuple(vals),
+        )
+        asset_id = int(cur.fetchone()["id"])
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    return asset_id
+
+@app.on_event("startup")
+def startup_ai_studio_v028():
+    _ai_dirs()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ai_schema(cur)
+        conn.commit()
+
+@app.get("/ai-studio/status")
+def ai_studio_status(user: dict = Depends(get_current_user)):
+    return {
+        "configured": bool(_ai_key()),
+        "provider": "OpenAI",
+        "model": AI_MODEL,
+        "reference_images": True,
+        "max_reference_images": 16,
+    }
+
+@app.get("/ai-projects")
+def ai_projects(search: str | None = Query(default=None, max_length=200), limit: int = Query(default=150, ge=1, le=500), user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ai_schema(cur)
+            phrase = (search or "").strip()
+            if phrase:
+                like = "%" + phrase + "%"
+                cur.execute("""
+                    SELECT p.*, o.order_number, o.client_name, o.name AS order_name,
+                           (SELECT COUNT(*) FROM ai_project_versions v WHERE v.project_id=p.id) AS versions_count
+                    FROM ai_projects p
+                    LEFT JOIN orders o ON o.id=p.order_id
+                    WHERE p.is_archived=FALSE
+                      AND (p.name ILIKE %s OR p.project_number ILIKE %s OR p.brief ILIKE %s
+                           OR COALESCE(o.order_number,'') ILIKE %s OR COALESCE(o.client_name,'') ILIKE %s)
+                    ORDER BY p.updated_at DESC, p.id DESC LIMIT %s
+                """, (like, like, like, like, like, limit))
+            else:
+                cur.execute("""
+                    SELECT p.*, o.order_number, o.client_name, o.name AS order_name,
+                           (SELECT COUNT(*) FROM ai_project_versions v WHERE v.project_id=p.id) AS versions_count
+                    FROM ai_projects p
+                    LEFT JOIN orders o ON o.id=p.order_id
+                    WHERE p.is_archived=FALSE
+                    ORDER BY p.updated_at DESC, p.id DESC LIMIT %s
+                """, (limit,))
+            rows = cur.fetchall()
+        conn.commit()
+    return [dict(x) for x in rows]
+
+@app.post("/ai-projects", status_code=status.HTTP_201_CREATED)
+def ai_project_create(data: AIProjectIn, user: dict = Depends(get_current_user)):
+    if data.project_type not in {"lettering","logo","social","graphic","custom"}:
+        raise HTTPException(status_code=400, detail="Nieprawidłowy typ projektu")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ai_schema(cur)
+            if data.order_id:
+                get_order_or_404(cur, data.order_id)
+            tmp = "AI-TMP-" + _aiuuid.uuid4().hex[:10]
+            cur.execute("""
+                INSERT INTO ai_projects(project_number,order_id,name,project_type,brief,color_count,text_content,notes)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (tmp, data.order_id, data.name.strip(), data.project_type, data.brief.strip(), data.color_count,
+                  data.text_content.strip() if data.text_content else None, data.notes.strip() if data.notes else None))
+            pid = int(cur.fetchone()["id"])
+            cur.execute("UPDATE ai_projects SET project_number=%s WHERE id=%s", (f"AI-{pid:05d}", pid))
+            project = _ai_project(cur, pid)
+        conn.commit()
+    return project
+
+@app.get("/ai-projects/{project_id}")
+def ai_project_detail(project_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            project = _ai_project(cur, project_id)
+            cur.execute("SELECT * FROM ai_project_references WHERE project_id=%s ORDER BY id", (project_id,))
+            refs = cur.fetchall()
+            cur.execute("SELECT * FROM ai_project_versions WHERE project_id=%s ORDER BY version DESC", (project_id,))
+            versions = cur.fetchall()
+    project["references"] = [dict(x) for x in refs]
+    project["versions"] = [dict(x) for x in versions]
+    project["generated_prompt"] = _ai_prompt(project)
+    return project
+
+@app.patch("/ai-projects/{project_id}")
+def ai_project_update(project_id: int, data: AIProjectIn, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ai_project(cur, project_id)
+            if data.order_id:
+                get_order_or_404(cur, data.order_id)
+            cur.execute("""
+                UPDATE ai_projects SET order_id=%s,name=%s,project_type=%s,brief=%s,color_count=%s,
+                    text_content=%s,notes=%s,updated_at=NOW() WHERE id=%s
+            """, (data.order_id, data.name.strip(), data.project_type, data.brief.strip(), data.color_count,
+                  data.text_content.strip() if data.text_content else None, data.notes.strip() if data.notes else None, project_id))
+            project = _ai_project(cur, project_id)
+        conn.commit()
+    return project
+
+@app.post("/ai-projects/{project_id}/references", status_code=status.HTTP_201_CREATED)
+async def ai_reference_upload(project_id: int, file: _AIUploadFile = _AIFile(...), user: dict = Depends(get_current_user)):
+    _ai_dirs()
+    data = await file.read()
+    mime = (file.content_type or _aimime.guess_type(file.filename or "")[0] or "").lower()
+    if mime not in {"image/png","image/jpeg","image/webp"}:
+        raise HTTPException(status_code=400, detail="Referencja musi być PNG, JPG lub WEBP")
+    if not data or len(data) > 15*1024*1024:
+        raise HTTPException(status_code=400, detail="Plik jest pusty lub większy niż 15 MB")
+    ext = { "image/png":".png", "image/jpeg":".jpg", "image/webp":".webp" }[mime]
+    path = AI_REFS / f"p{project_id}-{_aiuuid.uuid4().hex}{ext}"
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                _ai_project(cur, project_id)
+                path.write_bytes(data)
+                cur.execute("""
+                    INSERT INTO ai_project_references(project_id,original_filename,file_path,mime_type,file_size)
+                    VALUES(%s,%s,%s,%s,%s) RETURNING *
+                """, (project_id, file.filename or path.name, str(path), mime, len(data)))
+                row = cur.fetchone()
+                cur.execute("UPDATE ai_projects SET updated_at=NOW() WHERE id=%s", (project_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            path.unlink(missing_ok=True)
+            raise
+    return dict(row)
+
+@app.get("/ai-project-references/{reference_id}/file")
+def ai_reference_file(reference_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM ai_project_references WHERE id=%s", (reference_id,))
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Brak referencji")
+    path = _AIPath(str(row["file_path"]))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Brak pliku")
+    return FileResponse(path=str(path), media_type=row.get("mime_type") or "application/octet-stream")
+
+@app.delete("/ai-project-references/{reference_id}")
+def ai_reference_delete(reference_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM ai_project_references WHERE id=%s FOR UPDATE", (reference_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Brak referencji")
+            cur.execute("DELETE FROM ai_project_references WHERE id=%s", (reference_id,))
+        conn.commit()
+    _AIPath(str(row["file_path"])).unlink(missing_ok=True)
+    return {"ok": True}
+
+@app.post("/ai-projects/{project_id}/generate", status_code=status.HTTP_201_CREATED)
+def ai_generate_version(project_id: int, data: AIGenerateIn, user: dict = Depends(get_current_user)):
+    if data.quality not in {"low","medium","high","auto"} or data.size not in {"1024x1024","1536x1024","1024x1536"}:
+        raise HTTPException(status_code=400, detail="Nieprawidłowe parametry generowania")
+    if not _ai_key():
+        raise HTTPException(status_code=503, detail="AI czeka na klucz OpenAI API")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            project = _ai_project(cur, project_id)
+            cur.execute("SELECT * FROM ai_project_references WHERE project_id=%s ORDER BY id LIMIT 16", (project_id,))
+            refs = [dict(x) for x in cur.fetchall()]
+            version = _ai_next_version(cur, project_id)
+    prompt = _ai_prompt(project, data.revision)
+    try:
+        response = _ai_generate(prompt, refs, data.quality, data.size)
+        image = _ai_image_bytes(response)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:1000]) from exc
+    path = AI_OUT / f"{project.get('project_number')}-v{version}-{_aiuuid.uuid4().hex[:8]}.png"
+    path.write_bytes(image)
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO ai_project_versions(project_id,version,version_type,prompt,model,quality,size,image_path,original_filename)
+                    VALUES(%s,%s,'ai',%s,%s,%s,%s,%s,%s) RETURNING *
+                """, (project_id, version, prompt, AI_MODEL, data.quality, data.size, str(path), path.name))
+                row = cur.fetchone()
+                cur.execute("UPDATE ai_projects SET status='active',updated_at=NOW() WHERE id=%s", (project_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            path.unlink(missing_ok=True)
+            raise
+    return dict(row)
+
+@app.post("/ai-projects/{project_id}/svg-version", status_code=status.HTTP_201_CREATED)
+async def ai_svg_upload(project_id: int, file: _AIUploadFile = _AIFile(...), user: dict = Depends(get_current_user)):
+    _ai_dirs()
+    data = await file.read()
+    _ai_svg_ok(data)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            project = _ai_project(cur, project_id)
+            version = _ai_next_version(cur, project_id)
+    path = AI_SVG / f"{project.get('project_number')}-v{version}-{_aiuuid.uuid4().hex[:8]}.svg"
+    path.write_bytes(data)
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO ai_project_versions(project_id,version,version_type,svg_path,original_filename)
+                    VALUES(%s,%s,'svg',%s,%s) RETURNING *
+                """, (project_id, version, str(path), file.filename or path.name))
+                row = cur.fetchone()
+                cur.execute("UPDATE ai_projects SET updated_at=NOW() WHERE id=%s", (project_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            path.unlink(missing_ok=True)
+            raise
+    return dict(row)
+
+@app.get("/ai-project-versions/{version_id}/file")
+def ai_version_file(version_id: int, download: bool = Query(default=False), user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM ai_project_versions WHERE id=%s", (version_id,))
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Brak wersji")
+    raw = row.get("svg_path") or row.get("image_path")
+    if not raw:
+        raise HTTPException(status_code=404, detail="Wersja nie ma pliku")
+    path = _AIPath(str(raw))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Brak pliku wersji")
+    media = "image/svg+xml" if row.get("svg_path") else "image/png"
+    disposition = "attachment" if download else "inline"
+    return FileResponse(path=str(path), media_type=media, headers={"Content-Disposition": f'{disposition}; filename="{row.get("original_filename") or path.name}"'})
+
+@app.post("/ai-project-versions/{version_id}/approve")
+def ai_version_approve(version_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM ai_project_versions WHERE id=%s", (version_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Brak wersji")
+            pid = int(row["project_id"])
+            cur.execute("UPDATE ai_project_versions SET is_approved=FALSE WHERE project_id=%s", (pid,))
+            cur.execute("UPDATE ai_project_versions SET is_approved=TRUE WHERE id=%s", (version_id,))
+            cur.execute("UPDATE ai_projects SET status='approved',updated_at=NOW() WHERE id=%s", (pid,))
+        conn.commit()
+    return {"ok": True, "message": "Wersja zaakceptowana"}
+
+@app.post("/ai-project-versions/{version_id}/send-to-library")
+def ai_version_library(version_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM ai_project_versions WHERE id=%s FOR UPDATE", (version_id,))
+                version = cur.fetchone()
+                if not version:
+                    raise HTTPException(status_code=404, detail="Brak wersji")
+                if not version.get("svg_path"):
+                    raise HTTPException(status_code=400, detail="Do Biblioteki można wysłać tylko produkcyjny SVG")
+                if version.get("svg_asset_id"):
+                    return {"ok": True, "asset_id": int(version["svg_asset_id"]), "message": "SVG jest już w bibliotece"}
+                project = _ai_project(cur, int(version["project_id"]))
+                asset_id = _ai_library_insert(cur, project, dict(version))
+                cur.execute("UPDATE ai_project_versions SET svg_asset_id=%s,is_approved=TRUE WHERE id=%s", (asset_id, version_id))
+                cur.execute("UPDATE ai_project_versions SET is_approved=FALSE WHERE project_id=%s AND id<>%s", (version["project_id"], version_id))
+                cur.execute("UPDATE ai_projects SET status='production',updated_at=NOW() WHERE id=%s", (version["project_id"],))
+            conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail="Nie udało się dodać do Biblioteki SVG: " + str(exc)[:500]) from exc
+    return {"ok": True, "asset_id": asset_id, "message": "SVG dodany do Biblioteki i oznaczony jako produkcyjny"}
+
+@app.delete("/ai-project-versions/{version_id}")
+def ai_version_delete(version_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM ai_project_versions WHERE id=%s FOR UPDATE", (version_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Brak wersji")
+            if row.get("svg_asset_id"):
+                raise HTTPException(status_code=409, detail="Ta wersja jest już w Bibliotece SVG")
+            cur.execute("DELETE FROM ai_project_versions WHERE id=%s", (version_id,))
+        conn.commit()
+    for key in ("image_path","svg_path"):
+        if row.get(key):
+            _AIPath(str(row[key])).unlink(missing_ok=True)
+    return {"ok": True}
+
+@app.get("/orders/{order_id}/ai-projects")
+def order_ai_projects(order_id: int, user: dict = Depends(get_current_user)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            get_order_or_404(cur, order_id)
+            cur.execute("""
+                SELECT p.*, (SELECT COUNT(*) FROM ai_project_versions v WHERE v.project_id=p.id) AS versions_count
+                FROM ai_projects p
+                WHERE p.order_id=%s AND p.is_archived=FALSE
+                ORDER BY p.updated_at DESC
+            """, (order_id,))
+            rows = cur.fetchall()
+    return [dict(x) for x in rows]
