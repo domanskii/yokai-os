@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.38.1")
+app = FastAPI(title="YOKAI OS API", version="0.38.2")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.38.1",
+        "version": "0.38.2",
         "status": "running",
     }
 
@@ -16602,7 +16602,7 @@ PROMO_MODEL = (
         "OPENAI_PROMO_MODEL",
         "gpt-4.1-nano",
     ).strip()
-    or "gpt-5-nano"
+    or "gpt-4.1-nano"
 )
 
 class AIPromotionIn(BaseModel):
@@ -16611,31 +16611,81 @@ class AIPromotionIn(BaseModel):
 def _promo_clean_text(value, limit):
     return str(value or "").strip()[:limit]
 
+def _promo_clean_list(value, item_limit, max_items):
+    if not isinstance(value, list):
+        return []
+
+    result = []
+
+    for item in value[:max_items]:
+        cleaned = _promo_clean_text(
+            item,
+            item_limit,
+        )
+
+        if cleaned:
+            result.append(cleaned)
+
+    return result
+
 def _promo_normalize(payload):
-    platform = _promo_clean_text(payload.get("platform"), 40)
-    if platform not in {"TikTok", "Instagram", "Facebook"}:
+    platform = _promo_clean_text(
+        payload.get("platform"),
+        40,
+    )
+
+    if platform not in {
+        "TikTok",
+        "Instagram",
+        "Facebook",
+    }:
         platform = "TikTok"
 
-    tags = payload.get("hashtags")
-    if not isinstance(tags, list):
-        tags = []
+    tags = _promo_clean_list(
+        payload.get("hashtags"),
+        40,
+        10,
+    )
 
     clean_tags = []
-    for tag in tags[:8]:
-        value = _promo_clean_text(tag, 40)
-        if not value:
-            continue
-        if not value.startswith("#"):
-            value = "#" + value.lstrip("#")
-        clean_tags.append(value)
+
+    for tag in tags:
+        if not tag.startswith("#"):
+            tag = "#" + tag.lstrip("#")
+
+        clean_tags.append(tag)
 
     return {
         "platform": platform,
-        "format": _promo_clean_text(payload.get("format"), 100),
-        "hook": _promo_clean_text(payload.get("hook"), 180),
-        "idea": _promo_clean_text(payload.get("idea"), 360),
-        "caption": _promo_clean_text(payload.get("caption"), 500),
-        "cta": _promo_clean_text(payload.get("cta"), 180),
+        "format": _promo_clean_text(
+            payload.get("format"),
+            120,
+        ),
+        "audience": _promo_clean_text(
+            payload.get("audience"),
+            360,
+        ),
+        "placements": _promo_clean_list(
+            payload.get("placements"),
+            100,
+            7,
+        ),
+        "hook": _promo_clean_text(
+            payload.get("hook"),
+            220,
+        ),
+        "idea": _promo_clean_text(
+            payload.get("idea"),
+            520,
+        ),
+        "caption": _promo_clean_text(
+            payload.get("caption"),
+            1200,
+        ),
+        "cta": _promo_clean_text(
+            payload.get("cta"),
+            220,
+        ),
         "hashtags": clean_tags,
     }
 
@@ -16645,12 +16695,22 @@ def ai_version_promotion(
     data: AIPromotionIn,
     user: dict = Depends(get_current_user),
 ):
-    requested = str(data.platform or "auto").strip().lower()
+    requested = str(
+        data.platform or "auto"
+    ).strip().lower()
 
-    if requested not in {"auto", "tiktok", "instagram", "facebook"}:
+    if requested not in {
+        "auto",
+        "tiktok",
+        "instagram",
+        "facebook",
+    }:
         raise HTTPException(
             status_code=400,
-            detail="Platforma: auto, TikTok, Instagram lub Facebook",
+            detail=(
+                "Platforma: auto, TikTok, "
+                "Instagram lub Facebook"
+            ),
         )
 
     if not _ai_key():
@@ -16669,11 +16729,13 @@ def ai_version_promotion(
                     p.brief AS project_brief,
                     p.text_content
                 FROM ai_project_versions v
-                JOIN ai_projects p ON p.id = v.project_id
+                JOIN ai_projects p
+                  ON p.id = v.project_id
                 WHERE v.id = %s
                 """,
                 (version_id,),
             )
+
             row = cur.fetchone()
 
     if not row:
@@ -16684,30 +16746,46 @@ def ai_version_promotion(
 
     version = dict(row)
 
-    if version.get("version_type") != "ai" or not version.get("image_path"):
+    if (
+        version.get("version_type") != "ai"
+        or not version.get("image_path")
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Promocję generujemy dla grafiki AI PNG",
+            detail=(
+                "Promocję generujemy "
+                "dla grafiki AI PNG"
+            ),
         )
 
-    path = _AIPath(str(version["image_path"]))
+    path = _AIPath(
+        str(version["image_path"])
+    )
+
     if not path.exists():
         raise HTTPException(
             status_code=404,
             detail="Brak pliku grafiki",
         )
 
-    mime = _promomime.guess_type(path.name)[0] or "image/png"
+    mime = (
+        _promomime.guess_type(path.name)[0]
+        or "image/png"
+    )
+
     image_data = (
         "data:"
         + mime
         + ";base64,"
-        + _promob64.b64encode(path.read_bytes()).decode("ascii")
+        + _promob64.b64encode(
+            path.read_bytes()
+        ).decode("ascii")
     )
 
     if requested == "auto":
         platform_instruction = (
-            "Sam wybierz jedną platformę: TikTok, Instagram albo Facebook."
+            "Sam wybierz jedną platformę: "
+            "TikTok, Instagram albo Facebook."
         )
     else:
         platform_instruction = (
@@ -16723,9 +16801,18 @@ def ai_version_promotion(
     project_context = " | ".join(
         part
         for part in [
-            _promo_clean_text(version.get("project_name"), 160),
-            _promo_clean_text(version.get("project_brief"), 500),
-            _promo_clean_text(version.get("text_content"), 180),
+            _promo_clean_text(
+                version.get("project_name"),
+                160,
+            ),
+            _promo_clean_text(
+                version.get("project_brief"),
+                500,
+            ),
+            _promo_clean_text(
+                version.get("text_content"),
+                180,
+            ),
         ]
         if part
     )
@@ -16738,21 +16825,48 @@ def ai_version_promotion(
             "properties": {
                 "platform": {
                     "type": "string",
-                    "enum": ["TikTok", "Instagram", "Facebook"],
+                    "enum": [
+                        "TikTok",
+                        "Instagram",
+                        "Facebook",
+                    ],
                 },
-                "format": {"type": "string"},
-                "hook": {"type": "string"},
-                "idea": {"type": "string"},
-                "caption": {"type": "string"},
-                "cta": {"type": "string"},
+                "format": {
+                    "type": "string",
+                },
+                "audience": {
+                    "type": "string",
+                },
+                "placements": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                    },
+                },
+                "hook": {
+                    "type": "string",
+                },
+                "idea": {
+                    "type": "string",
+                },
+                "caption": {
+                    "type": "string",
+                },
+                "cta": {
+                    "type": "string",
+                },
                 "hashtags": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "type": "string",
+                    },
                 },
             },
             "required": [
                 "platform",
                 "format",
+                "audience",
+                "placements",
                 "hook",
                 "idea",
                 "caption",
@@ -16763,20 +16877,34 @@ def ai_version_promotion(
         },
     }
 
+    system_prompt = (
+        "Tworzysz praktyczne, gotowe do skopiowania materiały promocyjne "
+        "dla YOKAI WRAP na podstawie grafiki naklejki. "
+        "To NIE jest strategia marketingowa ani kampania. "
+        "Masz opisać konkretny produkt tak, żeby tekst dało się od razu "
+        "wkleić do social mediów. "
+        "Najpierw oceń, co rzeczywiście widać na grafice. "
+        "Jeśli czegoś nie da się ustalić, nie wymyślaj tego. "
+        "Nie wymyślaj ceny, materiału, wymiaru, trwałości ani parametrów, "
+        "jeżeli nie podano ich w kontekście. "
+        "DLA KOGO: wskaż 2-4 sensowne grupy odbiorców wynikające z motywu. "
+        "GDZIE PRZYKLEIĆ: podaj 4-7 konkretnych, realnych miejsc lub "
+        "przedmiotów pasujących do takiej naklejki, np. auto, laptop, "
+        "kask, skrzynka, lustro, witryna, sprzęt sportowy — ale tylko "
+        "gdy ma to sens dla grafiki. "
+        "HOOK: jedno krótkie zdanie. "
+        "POMYSŁ: 2-3 konkretne zdania jak pokazać produkt w poście lub filmie. "
+        "OPIS: 4-6 krótkich zdań. Ma opisywać motyw, dla kogo jest, "
+        "gdzie może pasować i dlaczego zwraca uwagę. "
+        "CTA: jedno krótkie zdanie. "
+        "HASHTAGI: 6-10 konkretnych tagów, bez losowych ogólników. "
+        "Nie pisz analiz. Nie dodawaj komentarzy poza JSON."
+    )
+
     messages = [
         {
             "role": "system",
-            "content": (
-                "Tworzysz krótkie, gotowe do skopiowania materiały promocyjne "
-                "dla YOKAI WRAP. To NIE jest strategia ani kampania. "
-                "Odpowiedź ma być maksymalnie konkretna i krótka. "
-                "Na podstawie grafiki zaproponuj jedną prostą publikację. "
-                "Nie wymyślaj cen, rabatów, parametrów ani obietnic, których "
-                "nie widać lub nie podano. Opis maksymalnie 2 krótkie zdania. "
-                "Pomysł maksymalnie 2 krótkie zdania. Hook i CTA po jednym "
-                "zdaniu. Daj 5-8 hashtagów. Zwróć wyłącznie JSON zgodny "
-                "ze schematem."
-            ),
+            "content": system_prompt,
         },
         {
             "role": "user",
@@ -16786,9 +16914,12 @@ def ai_version_promotion(
                     "text": (
                         platform_instruction
                         + "\nKontekst projektu: "
-                        + (project_context or "brak dodatkowych danych")
-                        + "\nStwórz prosty materiał do skopiowania "
-                        "na podstawie grafiki."
+                        + (
+                            project_context
+                            or "brak dodatkowych danych"
+                        )
+                        + "\nPrzygotuj gotowy materiał "
+                        "promocyjny do skopiowania."
                     ),
                 },
                 {
@@ -16812,22 +16943,38 @@ def ai_version_promotion(
                     "type": "json_schema",
                     "json_schema": schema,
                 },
-                "max_completion_tokens": 350,
+                "max_completion_tokens": 650,
             },
         )
 
         choices = response.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise RuntimeError("OpenAI nie zwrócił odpowiedzi")
 
-        message = choices[0].get("message") or {}
+        if (
+            not isinstance(choices, list)
+            or not choices
+        ):
+            raise RuntimeError(
+                "OpenAI nie zwrócił odpowiedzi"
+            )
+
+        message = (
+            choices[0].get("message")
+            or {}
+        )
+
         refusal = message.get("refusal")
+
         if refusal:
-            raise RuntimeError(str(refusal)[:500])
+            raise RuntimeError(
+                str(refusal)[:500]
+            )
 
         content = message.get("content")
+
         if not isinstance(content, str):
-            raise RuntimeError("Brak treści odpowiedzi")
+            raise RuntimeError(
+                "Brak treści odpowiedzi"
+            )
 
         content = content.strip()
 
@@ -16845,7 +16992,10 @@ def ai_version_promotion(
         try:
             result = _promojson.loads(content)
         except _promojson.JSONDecodeError as exc:
-            preview = content[:180].replace("\n", " ")
+            preview = content[:180].replace(
+                "\n",
+                " ",
+            )
 
             raise RuntimeError(
                 "OpenAI zwrócił nieprawidłowy JSON: "
@@ -16859,6 +17009,7 @@ def ai_version_promotion(
 
     except HTTPException:
         raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=502,
