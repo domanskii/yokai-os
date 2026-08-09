@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.28.0")
+app = FastAPI(title="YOKAI OS API", version="0.28.1")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.28.0",
+        "version": "0.28.1",
         "status": "running",
     }
 
@@ -12462,7 +12462,7 @@ def _ai_prompt(project, revision=None):
         f"Customer brief: {project.get('brief') or ''}",
         f"Use at most {int(project.get('color_count') or 2)} solid vinyl colors.",
         "STRICT PRODUCTION RULES: flat solid fills only; no gradients; no shadows; no glow; no photographic textures; no halftones; no tiny isolated specks; no mockup or background. Use clean closed silhouettes, smooth plotter-friendly curves, strong negative space, clear separation between color layers, and avoid fragile micro-details.",
-        "Transparent background. Show only the sticker artwork, centered with empty space around it.",
+        "Use a plain solid white background only. Show only the sticker artwork, centered with empty space around it. No scene, mockup, texture, checkerboard or decorative background.",
     ]
     if text:
         parts.append(f'Required text exactly: "{text}". Do not invent any other wording.')
@@ -12533,7 +12533,7 @@ def _ai_generate(prompt, refs, quality, size):
             "prompt": prompt,
             "size": size,
             "quality": quality,
-            "background": "transparent",
+            "background": "opaque",
             "output_format": "png",
             "n": 1,
         })
@@ -12551,7 +12551,7 @@ def _ai_generate(prompt, refs, quality, size):
         "prompt": prompt,
         "size": size,
         "quality": quality,
-        "background": "transparent",
+        "background": "opaque",
         "output_format": "png",
     }, files)
     request = _aireq.Request(
