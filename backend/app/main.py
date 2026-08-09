@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.37.4")
+app = FastAPI(title="YOKAI OS API", version="0.38.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.37.4",
+        "version": "0.38.0",
         "status": "running",
     }
 
@@ -16589,3 +16589,257 @@ def production_pro_finish(
             "profit": profit,
         },
     }
+
+# === YOKAI AI PROMOTION V0.38 ===
+
+import base64 as _promob64
+import json as _promojson
+import mimetypes as _promomime
+import os as _promoos
+
+PROMO_MODEL = (
+    _promoos.environ.get(
+        "OPENAI_PROMO_MODEL",
+        "gpt-5-nano",
+    ).strip()
+    or "gpt-5-nano"
+)
+
+class AIPromotionIn(BaseModel):
+    platform: str = Field(default="auto", max_length=20)
+
+def _promo_clean_text(value, limit):
+    return str(value or "").strip()[:limit]
+
+def _promo_normalize(payload):
+    platform = _promo_clean_text(payload.get("platform"), 40)
+    if platform not in {"TikTok", "Instagram", "Facebook"}:
+        platform = "TikTok"
+
+    tags = payload.get("hashtags")
+    if not isinstance(tags, list):
+        tags = []
+
+    clean_tags = []
+    for tag in tags[:8]:
+        value = _promo_clean_text(tag, 40)
+        if not value:
+            continue
+        if not value.startswith("#"):
+            value = "#" + value.lstrip("#")
+        clean_tags.append(value)
+
+    return {
+        "platform": platform,
+        "format": _promo_clean_text(payload.get("format"), 100),
+        "hook": _promo_clean_text(payload.get("hook"), 180),
+        "idea": _promo_clean_text(payload.get("idea"), 360),
+        "caption": _promo_clean_text(payload.get("caption"), 500),
+        "cta": _promo_clean_text(payload.get("cta"), 180),
+        "hashtags": clean_tags,
+    }
+
+@app.post("/ai-project-versions/{version_id}/promotion")
+def ai_version_promotion(
+    version_id: int,
+    data: AIPromotionIn,
+    user: dict = Depends(get_current_user),
+):
+    requested = str(data.platform or "auto").strip().lower()
+
+    if requested not in {"auto", "tiktok", "instagram", "facebook"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Platforma: auto, TikTok, Instagram lub Facebook",
+        )
+
+    if not _ai_key():
+        raise HTTPException(
+            status_code=503,
+            detail="AI czeka na klucz OpenAI API",
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    v.*,
+                    p.name AS project_name,
+                    p.brief AS project_brief,
+                    p.text_content
+                FROM ai_project_versions v
+                JOIN ai_projects p ON p.id = v.project_id
+                WHERE v.id = %s
+                """,
+                (version_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Nie znaleziono wersji projektu",
+        )
+
+    version = dict(row)
+
+    if version.get("version_type") != "ai" or not version.get("image_path"):
+        raise HTTPException(
+            status_code=400,
+            detail="Promocję generujemy dla grafiki AI PNG",
+        )
+
+    path = _AIPath(str(version["image_path"]))
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Brak pliku grafiki",
+        )
+
+    mime = _promomime.guess_type(path.name)[0] or "image/png"
+    image_data = (
+        "data:"
+        + mime
+        + ";base64,"
+        + _promob64.b64encode(path.read_bytes()).decode("ascii")
+    )
+
+    if requested == "auto":
+        platform_instruction = (
+            "Sam wybierz jedną platformę: TikTok, Instagram albo Facebook."
+        )
+    else:
+        platform_instruction = (
+            "Użyj dokładnie platformy: "
+            + {
+                "tiktok": "TikTok",
+                "instagram": "Instagram",
+                "facebook": "Facebook",
+            }[requested]
+            + "."
+        )
+
+    project_context = " | ".join(
+        part
+        for part in [
+            _promo_clean_text(version.get("project_name"), 160),
+            _promo_clean_text(version.get("project_brief"), 500),
+            _promo_clean_text(version.get("text_content"), 180),
+        ]
+        if part
+    )
+
+    schema = {
+        "name": "yokai_promotion",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": ["TikTok", "Instagram", "Facebook"],
+                },
+                "format": {"type": "string"},
+                "hook": {"type": "string"},
+                "idea": {"type": "string"},
+                "caption": {"type": "string"},
+                "cta": {"type": "string"},
+                "hashtags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "platform",
+                "format",
+                "hook",
+                "idea",
+                "caption",
+                "cta",
+                "hashtags",
+            ],
+            "additionalProperties": False,
+        },
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Tworzysz krótkie, gotowe do skopiowania materiały promocyjne "
+                "dla YOKAI WRAP. To NIE jest strategia ani kampania. "
+                "Odpowiedź ma być maksymalnie konkretna i krótka. "
+                "Na podstawie grafiki zaproponuj jedną prostą publikację. "
+                "Nie wymyślaj cen, rabatów, parametrów ani obietnic, których "
+                "nie widać lub nie podano. Opis maksymalnie 2 krótkie zdania. "
+                "Pomysł maksymalnie 2 krótkie zdania. Hook i CTA po jednym "
+                "zdaniu. Daj 5-8 hashtagów. Zwróć wyłącznie JSON zgodny "
+                "ze schematem."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        platform_instruction
+                        + "\nKontekst projektu: "
+                        + (project_context or "brak dodatkowych danych")
+                        + "\nStwórz prosty materiał do skopiowania "
+                        "na podstawie grafiki."
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_data,
+                        "detail": "low",
+                    },
+                },
+            ],
+        },
+    ]
+
+    try:
+        response = _ai_http_json(
+            "/v1/chat/completions",
+            {
+                "model": PROMO_MODEL,
+                "messages": messages,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": schema,
+                },
+                "max_completion_tokens": 350,
+            },
+        )
+
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("OpenAI nie zwrócił odpowiedzi")
+
+        message = choices[0].get("message") or {}
+        refusal = message.get("refusal")
+        if refusal:
+            raise RuntimeError(str(refusal)[:500])
+
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("Brak treści odpowiedzi")
+
+        result = _promojson.loads(content)
+
+        return {
+            **_promo_normalize(result),
+            "model": PROMO_MODEL,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc)[:900],
+        ) from exc

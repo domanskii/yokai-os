@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
+import { PromotionGenerator } from "../../components/ai-promotion-generator";
 import {
   Bot,
   Boxes,
@@ -1386,7 +1387,14 @@ export default function AIStudioPage() {
                                       Pobierz
                                     </button>
 
-                                    {version.version_type === "svg" && (
+                                    
+                                    {version.version_type === "ai" && (
+                                      <PromotionGenerator
+                                        versionId={version.id}
+                                      />
+                                    )}
+
+{version.version_type === "svg" && (
                                       <button
                                         onClick={() =>
                                           void versionAction(
