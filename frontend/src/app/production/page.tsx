@@ -169,7 +169,7 @@ const nav: NavItem[] = [
   {
     label: "AI Studio",
     icon: WandSparkles,
-    href: "/",
+    href: "/ai-studio",
   },
   {
     label: "Ustawienia",

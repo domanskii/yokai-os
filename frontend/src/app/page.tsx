@@ -89,7 +89,7 @@ const nav = [
   { label: "Materiały", icon: Boxes, href: "/materials" },
   { label: "Klienci", icon: Users, href: "/clients" },
   { label: "Finanse", icon: CircleDollarSign, href: "/finance" },
-  { label: "AI Studio", icon: WandSparkles, href: "/" },
+  { label: "AI Studio", icon: WandSparkles, href: "/ai-studio" },
   { label: "Ustawienia", icon: Settings, href: "/" },
 ];
 

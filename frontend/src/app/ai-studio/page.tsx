@@ -1,5 +1,7 @@
 "use client";
 
+import { YokaiSidebar } from "../../components/yokai-sidebar";
+
 import {
   useCallback,
   useEffect,
@@ -407,6 +409,22 @@ export default function AIStudioPage() {
         const o = Number(
           params.get("order")
         );
+
+        const createNew =
+          params.get("new")
+          === "1";
+
+        if (createNew) {
+          setSelected(null);
+          setName("");
+          setProjectType("graphic");
+          setBrief("");
+          setColors(2);
+          setTextValue("");
+          setNotes("");
+          setOrderId("");
+          setCreating(true);
+        }
 
         if (
           Number.isFinite(o)
@@ -822,9 +840,7 @@ export default function AIStudioPage() {
 
   return (
     <div className="min-h-screen bg-[#080b10] text-white">
-      <aside className="fixed inset-y-0 left-0 z-40 hidden w-[250px] border-r border-white/[.055] bg-[#0b0f15] lg:block">
-        <Sidebar />
-      </aside>
+      <YokaiSidebar activePath="/ai-studio" actionLabel="Nowy projekt" actionHref="/ai-studio?new=1" />
 
       {mobile && (
         <div className="fixed inset-0 z-[100] lg:hidden">

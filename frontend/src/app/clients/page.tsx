@@ -120,7 +120,7 @@ const nav: NavItem[] = [
     active: true,
   },
   { label: "Finanse", icon: CircleDollarSign, href: "/finance" },
-  { label: "AI Studio", icon: WandSparkles, href: "/" },
+  { label: "AI Studio", icon: WandSparkles, href: "/ai-studio" },
   { label: "Ustawienia", icon: Settings, href: "/" },
 ];
 

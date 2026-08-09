@@ -1,5 +1,7 @@
 "use client";
 
+import { YokaiSidebar } from "../../components/yokai-sidebar";
+
 import { SidebarAttentionBadge } from "../../components/sidebar-attention-badge";
 
 import {
@@ -385,9 +387,7 @@ export default function FinancePage() {
 
   return (
     <div className="min-h-screen bg-[#080b10] text-white">
-      <aside className="fixed inset-y-0 left-0 z-40 hidden w-[250px] border-r border-white/[.055] bg-[#0b0f15] lg:block">
-        <Sidebar />
-      </aside>
+      <YokaiSidebar activePath="/finance" />
 
       {mobileOpen && (
         <div className="fixed inset-0 z-[90] lg:hidden">
