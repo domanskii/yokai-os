@@ -32,6 +32,7 @@
       - /srv/yokai-data/svg:/srv/yokai-data/svg
       - /srv/yokai-data/pdf:/srv/yokai-data/pdf
       - /srv/yokai-data/ai:/srv/yokai-data/ai
+      - /srv/yokai-data/backups:/srv/yokai-data/backups
   frontend:
     build:
       context: ./frontend

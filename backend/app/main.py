@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.28.1")
+app = FastAPI(title="YOKAI OS API", version="0.33.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.28.1",
+        "version": "0.33.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.28",
+                "User-Agent": "YOKAI-OS/0.33",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.28",
+            "User-Agent": "YOKAI-OS/0.33",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.28",
+            "User-Agent": "YOKAI-OS/0.33",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.28",
+            "User-Agent": "YOKAI-OS/0.33",
         },
     )
 
@@ -11225,7 +11225,7 @@ def _woo_api(path: str, params: dict | None = None):
         headers={
             "Authorization": f"Basic {token}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.28",
+            "User-Agent": "YOKAI-OS/0.33",
         },
         method="GET",
     )
@@ -12486,7 +12486,7 @@ def _ai_http_json(endpoint, payload):
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.28",
+            "User-Agent": "YOKAI-OS/0.33",
         },
         method="POST",
     )
@@ -12561,7 +12561,7 @@ def _ai_generate(prompt, refs, quality, size):
             "Authorization": f"Bearer {key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.28",
+            "User-Agent": "YOKAI-OS/0.33",
         },
         method="POST",
     )
@@ -13003,3 +13003,2686 @@ def order_ai_projects(order_id: int, user: dict = Depends(get_current_user)):
             """, (order_id,))
             rows = cur.fetchall()
     return [dict(x) for x in rows]
+
+# === YOKAI BUSINESS CONTROL SUITE V0.33 ===
+
+import csv as _suite_csv
+import io as _suite_io
+import json as _suite_json
+import os as _suite_os
+import shutil as _suite_shutil
+import zipfile as _suite_zipfile
+from datetime import date as _SuiteDate
+from datetime import datetime as _SuiteDateTime
+from decimal import Decimal as _SuiteDecimal
+from pathlib import Path as _SuitePath
+
+from fastapi.responses import FileResponse as _SuiteFileResponse
+from fastapi.responses import Response as _SuiteResponse
+
+
+_SUITE_SETTINGS_DEFAULTS = {
+    "labor_hourly_cost": 30.0,
+    "shipping_cost": 17.0,
+    "free_shipping_threshold": 199.0,
+    "default_margin_percent": 40.0,
+    "woo_sync_interval_seconds": 600,
+    "ai_default_quality": "low",
+    "low_stock_days": 21,
+    "backup_retention": 10,
+    "report_default_days": 30,
+}
+
+
+class SuiteSettingsUpdate(BaseModel):
+    values: dict[str, object]
+
+
+def _suite_jsonable(value):
+    if isinstance(
+        value,
+        (
+            _SuiteDateTime,
+            _SuiteDate,
+        ),
+    ):
+        return value.isoformat()
+
+    if isinstance(
+        value,
+        _SuiteDecimal,
+    ):
+        return float(
+            value
+        )
+
+    return value
+
+
+def _suite_dec(
+    value,
+) -> _SuiteDecimal:
+    try:
+        return _SuiteDecimal(
+            str(
+                value
+                or 0
+            )
+        )
+    except Exception:
+        return _SuiteDecimal("0")
+
+
+def _suite_schema(
+    cur,
+) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value JSONB NOT NULL,
+            updated_at TIMESTAMPTZ
+                NOT NULL
+                DEFAULT NOW()
+        )
+        """
+    )
+
+    for key, value in (
+        _SUITE_SETTINGS_DEFAULTS
+        .items()
+    ):
+        cur.execute(
+            """
+            INSERT INTO app_settings (
+                key,
+                value
+            )
+            VALUES (
+                %s,
+                %s
+            )
+            ON CONFLICT (key)
+            DO NOTHING
+            """,
+            (
+                key,
+                Jsonb(
+                    value
+                ),
+            ),
+        )
+
+
+def _suite_setting(
+    cur,
+    key: str,
+    default=None,
+):
+    cur.execute(
+        """
+        SELECT value
+        FROM app_settings
+        WHERE key = %s
+        """,
+        (
+            key,
+        ),
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        return default
+
+    return row.get(
+        "value",
+        default,
+    )
+
+
+def _suite_all_settings(
+    cur,
+) -> dict:
+    _suite_schema(
+        cur
+    )
+
+    cur.execute(
+        """
+        SELECT
+            key,
+            value
+        FROM app_settings
+        ORDER BY key
+        """
+    )
+
+    values = dict(
+        _SUITE_SETTINGS_DEFAULTS
+    )
+
+    for row in cur.fetchall():
+        values[
+            str(
+                row[
+                    "key"
+                ]
+            )
+        ] = row.get(
+            "value"
+        )
+
+    return values
+
+
+def _suite_order_columns(
+    cur,
+) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE
+            table_schema = 'public'
+            AND table_name = 'orders'
+        """
+    )
+
+    return {
+        str(
+            row[
+                "column_name"
+            ]
+        )
+        for row
+        in cur.fetchall()
+    }
+
+
+def _suite_norm_key(
+    value: object,
+) -> str:
+    text = str(
+        value
+        or ""
+    ).strip().lower()
+
+    replacements = {
+        "ą": "a",
+        "ć": "c",
+        "ę": "e",
+        "ł": "l",
+        "ń": "n",
+        "ó": "o",
+        "ś": "s",
+        "ź": "z",
+        "ż": "z",
+    }
+
+    for source, target in (
+        replacements.items()
+    ):
+        text = text.replace(
+            source,
+            target,
+        )
+
+    text = (
+        text
+        .replace(
+            "_",
+            " ",
+        )
+        .replace(
+            "-",
+            " ",
+        )
+    )
+
+    return " ".join(
+        text.split()
+    )
+
+
+def _suite_find_meta(
+    meta_items: list,
+    aliases: list[str],
+):
+    normalized_aliases = [
+        _suite_norm_key(
+            alias
+        )
+        for alias in aliases
+    ]
+
+    for item in (
+        meta_items
+        or []
+    ):
+        key = _suite_norm_key(
+            item.get(
+                "key"
+            )
+            or item.get(
+                "display_key"
+            )
+        )
+
+        if not key:
+            continue
+
+        for alias in normalized_aliases:
+            if (
+                key == alias
+                or alias in key
+                or key in alias
+            ):
+                value = item.get(
+                    "value"
+                )
+
+                if value is None:
+                    value = item.get(
+                        "display_value"
+                    )
+
+                if value is not None:
+                    return value
+
+    return None
+
+
+def _suite_shop_spec_from_payload(
+    payload: dict | None,
+) -> dict:
+    payload = (
+        payload
+        if isinstance(
+            payload,
+            dict,
+        )
+        else {}
+    )
+
+    items = (
+        payload.get(
+            "items"
+        )
+        or []
+    )
+
+    first_item = (
+        items[0]
+        if items
+        and isinstance(
+            items[0],
+            dict,
+        )
+        else {}
+    )
+
+    meta = []
+
+    for item in items:
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        meta.extend(
+            item.get(
+                "meta"
+            )
+            or []
+        )
+
+    meta.extend(
+        payload.get(
+            "order_meta"
+        )
+        or []
+    )
+
+    product_name = str(
+        first_item.get(
+            "name"
+        )
+        or ""
+    ).strip()
+
+    product_name_norm = (
+        _suite_norm_key(
+            product_name
+        )
+    )
+
+    platform = _suite_find_meta(
+        meta,
+        [
+            "platforma",
+            "social media",
+            "platform",
+            "typ platformy",
+        ],
+    )
+
+    if not platform:
+        for candidate in (
+            "instagram",
+            "tiktok",
+            "facebook",
+            "youtube",
+        ):
+            if candidate in (
+                product_name_norm
+            ):
+                platform = (
+                    candidate
+                    .capitalize()
+                )
+                break
+
+    size = _suite_find_meta(
+        meta,
+        [
+            "rozmiar",
+            "wymiar",
+            "szerokosc",
+            "size",
+            "width",
+        ],
+    )
+
+    background = _suite_find_meta(
+        meta,
+        [
+            "tlo",
+            "z tlem",
+            "background",
+            "wariant tla",
+        ],
+    )
+
+    nfc = _suite_find_meta(
+        meta,
+        [
+            "nfc",
+            "tag nfc",
+            "wersja nfc",
+        ],
+    )
+
+    profile_name = _suite_find_meta(
+        meta,
+        [
+            "nazwa profilu",
+            "nazwa uzytkownika",
+            "nick",
+            "username",
+            "handle",
+            "profil",
+        ],
+    )
+
+    nfc_url = _suite_find_meta(
+        meta,
+        [
+            "link nfc",
+            "url nfc",
+            "adres nfc",
+            "link profilu",
+            "adres profilu",
+            "url",
+            "link",
+        ],
+    )
+
+    outer = _suite_find_meta(
+        meta,
+        [
+            "obrys",
+            "kolor obrysu",
+            "outer",
+        ],
+    )
+
+    contour = _suite_find_meta(
+        meta,
+        [
+            "kontur",
+            "kolor konturu",
+            "contour",
+        ],
+    )
+
+    fill = _suite_find_meta(
+        meta,
+        [
+            "wypelnienie",
+            "kolor wypelnienia",
+            "fill",
+        ],
+    )
+
+    colors = []
+
+    for label, value in (
+        (
+            "Obrys",
+            outer,
+        ),
+        (
+            "Kontur",
+            contour,
+        ),
+        (
+            "Wypełnienie",
+            fill,
+        ),
+    ):
+        if value not in (
+            None,
+            "",
+        ):
+            colors.append(
+                {
+                    "layer":
+                        label,
+                    "value":
+                        value,
+                }
+            )
+
+    warnings = []
+
+    if not items:
+        warnings.append(
+            "Brak produktów w danych WooCommerce"
+        )
+
+    if not platform:
+        warnings.append(
+            "Nie rozpoznano platformy"
+        )
+
+    if not size:
+        warnings.append(
+            "Nie rozpoznano rozmiaru"
+        )
+
+    nfc_text = (
+        _suite_norm_key(
+            nfc
+        )
+        if nfc is not None
+        else ""
+    )
+
+    nfc_enabled = (
+        bool(
+            nfc
+        )
+        and nfc_text
+        not in {
+            "nie",
+            "no",
+            "false",
+            "0",
+            "bez nfc",
+        }
+    )
+
+    if (
+        nfc_enabled
+        and not nfc_url
+    ):
+        warnings.append(
+            "NFC jest włączone, ale nie rozpoznano linku"
+        )
+
+    return {
+        "product_name":
+            product_name,
+        "platform":
+            platform,
+        "size":
+            size,
+        "background":
+            background,
+        "nfc":
+            nfc,
+        "nfc_enabled":
+            nfc_enabled,
+        "profile_name":
+            profile_name,
+        "nfc_url":
+            nfc_url,
+        "colors":
+            colors,
+        "items":
+            items,
+        "raw_meta":
+            meta,
+        "warnings":
+            warnings,
+    }
+
+
+def _suite_threshold_column(
+    cur,
+) -> str | None:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE
+            table_schema = 'public'
+            AND table_name = 'materials'
+        """
+    )
+
+    columns = {
+        str(
+            row[
+                "column_name"
+            ]
+        )
+        for row
+        in cur.fetchall()
+    }
+
+    for candidate in (
+        "low_stock_threshold_m",
+        "low_threshold_m",
+        "low_stock_threshold",
+        "low_threshold",
+    ):
+        if candidate in columns:
+            return candidate
+
+    return None
+
+
+def _suite_notifications(
+    cur,
+) -> list[dict]:
+    result = []
+    order_columns = (
+        _suite_order_columns(
+            cur
+        )
+    )
+
+    if {
+        "id",
+        "status",
+        "deadline",
+    }.issubset(
+        order_columns
+    ):
+        order_number_expr = (
+            "order_number"
+            if "order_number"
+            in order_columns
+            else "id::text"
+        )
+
+        client_expr = (
+            "client_name"
+            if "client_name"
+            in order_columns
+            else "''::text"
+        )
+
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                {order_number_expr}
+                    AS order_number,
+                {client_expr}
+                    AS client_name,
+                status,
+                deadline
+            FROM orders
+            WHERE
+                COALESCE(
+                    is_archived,
+                    FALSE
+                ) = FALSE
+                AND deadline IS NOT NULL
+                AND deadline < CURRENT_DATE
+                AND COALESCE(
+                    status,
+                    ''
+                )
+                NOT IN (
+                    'Zrealizowane',
+                    'Anulowane'
+                )
+            ORDER BY deadline ASC
+            LIMIT 50
+            """
+        )
+
+        for row in cur.fetchall():
+            result.append(
+                {
+                    "type":
+                        "overdue",
+                    "severity":
+                        "high",
+                    "title":
+                        "Zamówienie po terminie",
+                    "message":
+                        (
+                            f"{row.get('order_number')} · "
+                            f"{row.get('client_name') or 'bez klienta'}"
+                        ),
+                    "order_id":
+                        int(
+                            row[
+                                "id"
+                            ]
+                        ),
+                    "meta": {
+                        "deadline":
+                            row.get(
+                                "deadline"
+                            ),
+                        "status":
+                            row.get(
+                                "status"
+                            ),
+                    },
+                }
+            )
+
+    if {
+        "id",
+        "price",
+        "paid_amount",
+        "status",
+    }.issubset(
+        order_columns
+    ):
+        order_number_expr = (
+            "order_number"
+            if "order_number"
+            in order_columns
+            else "id::text"
+        )
+
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                {order_number_expr}
+                    AS order_number,
+                price,
+                paid_amount,
+                status
+            FROM orders
+            WHERE
+                COALESCE(
+                    is_archived,
+                    FALSE
+                ) = FALSE
+                AND COALESCE(
+                    price,
+                    0
+                )
+                > COALESCE(
+                    paid_amount,
+                    0
+                )
+                AND COALESCE(
+                    status,
+                    ''
+                ) <> 'Anulowane'
+            ORDER BY id DESC
+            LIMIT 50
+            """
+        )
+
+        for row in cur.fetchall():
+            due = (
+                _suite_dec(
+                    row.get(
+                        "price"
+                    )
+                )
+                - _suite_dec(
+                    row.get(
+                        "paid_amount"
+                    )
+                )
+            )
+
+            result.append(
+                {
+                    "type":
+                        "unpaid",
+                    "severity":
+                        (
+                            "high"
+                            if row.get(
+                                "status"
+                            )
+                            == "Gotowe"
+                            else "medium"
+                        ),
+                    "title":
+                        (
+                            "Gotowe, ale nieopłacone"
+                            if row.get(
+                                "status"
+                            )
+                            == "Gotowe"
+                            else "Nieopłacone zamówienie"
+                        ),
+                    "message":
+                        (
+                            f"{row.get('order_number')} · "
+                            f"do zapłaty {float(due):.2f} zł"
+                        ),
+                    "order_id":
+                        int(
+                            row[
+                                "id"
+                            ]
+                        ),
+                    "meta": {
+                        "due":
+                            float(
+                                due
+                            ),
+                    },
+                }
+            )
+
+    cur.execute(
+        """
+        SELECT to_regclass(
+            'public.svg_assets'
+        ) AS exists
+        """
+    )
+
+    svg_exists = bool(
+        (
+            cur.fetchone()
+            or {}
+        ).get(
+            "exists"
+        )
+    )
+
+    if (
+        svg_exists
+        and "id"
+        in order_columns
+        and "status"
+        in order_columns
+    ):
+        order_number_expr = (
+            "o.order_number"
+            if "order_number"
+            in order_columns
+            else "o.id::text"
+        )
+
+        cur.execute(
+            f"""
+            SELECT
+                o.id,
+                {order_number_expr}
+                    AS order_number,
+                o.status
+            FROM orders o
+            WHERE
+                COALESCE(
+                    o.is_archived,
+                    FALSE
+                ) = FALSE
+                AND COALESCE(
+                    o.status,
+                    ''
+                )
+                NOT IN (
+                    'Zrealizowane',
+                    'Anulowane'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM svg_assets s
+                    WHERE
+                        s.order_id = o.id
+                        AND COALESCE(
+                            s.is_archived,
+                            FALSE
+                        ) = FALSE
+                )
+            ORDER BY o.id DESC
+            LIMIT 50
+            """
+        )
+
+        for row in cur.fetchall():
+            result.append(
+                {
+                    "type":
+                        "missing_svg",
+                    "severity":
+                        "medium",
+                    "title":
+                        "Brak SVG",
+                    "message":
+                        f"{row.get('order_number')} · {row.get('status')}",
+                    "order_id":
+                        int(
+                            row[
+                                "id"
+                            ]
+                        ),
+                    "meta":
+                        {},
+                }
+            )
+
+    threshold_column = (
+        _suite_threshold_column(
+            cur
+        )
+    )
+
+    if threshold_column:
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                name,
+                color_name,
+                stock_length_m,
+                {threshold_column}
+                    AS threshold_m
+            FROM materials
+            WHERE
+                COALESCE(
+                    is_archived,
+                    FALSE
+                ) = FALSE
+                AND COALESCE(
+                    stock_length_m,
+                    0
+                )
+                <= COALESCE(
+                    {threshold_column},
+                    0
+                )
+            ORDER BY
+                stock_length_m ASC,
+                name
+            LIMIT 50
+            """
+        )
+
+        for row in cur.fetchall():
+            result.append(
+                {
+                    "type":
+                        "low_stock",
+                    "severity":
+                        "medium",
+                    "title":
+                        "Niski stan materiału",
+                    "message":
+                        (
+                            f"{row.get('name')}"
+                            + (
+                                f" · {row.get('color_name')}"
+                                if row.get(
+                                    "color_name"
+                                )
+                                else ""
+                            )
+                            + (
+                                f" · {float(_suite_dec(row.get('stock_length_m'))):.2f} m"
+                            )
+                        ),
+                    "material_id":
+                        int(
+                            row[
+                                "id"
+                            ]
+                        ),
+                    "meta": {
+                        "stock_length_m":
+                            float(
+                                _suite_dec(
+                                    row.get(
+                                        "stock_length_m"
+                                    )
+                                )
+                            ),
+                        "threshold_m":
+                            float(
+                                _suite_dec(
+                                    row.get(
+                                        "threshold_m"
+                                    )
+                                )
+                            ),
+                    },
+                }
+            )
+
+    cur.execute(
+        """
+        SELECT to_regclass(
+            'public.woo_order_automation'
+        ) AS exists
+        """
+    )
+
+    woo_exists = bool(
+        (
+            cur.fetchone()
+            or {}
+        ).get(
+            "exists"
+        )
+    )
+
+    if woo_exists:
+        cur.execute(
+            """
+            SELECT
+                local_order_id,
+                woo_order_id,
+                sync_error
+            FROM woo_order_automation
+            WHERE
+                sync_status = 'error'
+                OR sync_error IS NOT NULL
+            ORDER BY
+                updated_at DESC
+            LIMIT 30
+            """
+        )
+
+        for row in cur.fetchall():
+            result.append(
+                {
+                    "type":
+                        "woo_error",
+                    "severity":
+                        "high",
+                    "title":
+                        "Błąd synchronizacji WooCommerce",
+                    "message":
+                        (
+                            row.get(
+                                "sync_error"
+                            )
+                            or f"Woo #{row.get('woo_order_id')}"
+                        ),
+                    "order_id":
+                        (
+                            int(
+                                row[
+                                    "local_order_id"
+                                ]
+                            )
+                            if row.get(
+                                "local_order_id"
+                            )
+                            is not None
+                            else None
+                        ),
+                    "meta": {
+                        "woo_order_id":
+                            row.get(
+                                "woo_order_id"
+                            ),
+                    },
+                }
+            )
+
+    severity_rank = {
+        "high":
+            0,
+        "medium":
+            1,
+        "low":
+            2,
+    }
+
+    result.sort(
+        key=lambda item: (
+            severity_rank.get(
+                item.get(
+                    "severity"
+                ),
+                9,
+            ),
+            item.get(
+                "type"
+            )
+            or "",
+            item.get(
+                "message"
+            )
+            or "",
+        )
+    )
+
+    return result
+
+
+def _suite_report_orders(
+    cur,
+    days: int,
+) -> list[dict]:
+    columns = (
+        _suite_order_columns(
+            cur
+        )
+    )
+
+    required = {
+        "id",
+        "price",
+        "paid_amount",
+        "created_at",
+    }
+
+    if not required.issubset(
+        columns
+    ):
+        return []
+
+    fields = [
+        "id",
+        (
+            "order_number"
+            if "order_number"
+            in columns
+            else "id::text AS order_number"
+        ),
+        (
+            "client_name"
+            if "client_name"
+            in columns
+            else "''::text AS client_name"
+        ),
+        (
+            "name"
+            if "name"
+            in columns
+            else "''::text AS name"
+        ),
+        "price",
+        "paid_amount",
+        (
+            "status"
+            if "status"
+            in columns
+            else "''::text AS status"
+        ),
+        (
+            "source"
+            if "source"
+            in columns
+            else "''::text AS source"
+        ),
+        "created_at",
+    ]
+
+    archive_clause = (
+        "AND COALESCE(is_archived, FALSE) = FALSE"
+        if "is_archived"
+        in columns
+        else ""
+    )
+
+    cur.execute(
+        f"""
+        SELECT
+            {", ".join(fields)}
+        FROM orders
+        WHERE
+            created_at >=
+                NOW()
+                - (
+                    %s
+                    || ' days'
+                )::interval
+            {archive_clause}
+        ORDER BY
+            created_at DESC,
+            id DESC
+        """,
+        (
+            days,
+        ),
+    )
+
+    rows = [
+        dict(
+            row
+        )
+        for row
+        in cur.fetchall()
+    ]
+
+    snapshot_func = globals().get(
+        "_ops_order_snapshot"
+    )
+
+    for row in rows:
+        row[
+            "material_cost"
+        ] = 0.0
+
+        row[
+            "labor_cost"
+        ] = 0.0
+
+        row[
+            "estimated_profit"
+        ] = float(
+            _suite_dec(
+                row.get(
+                    "price"
+                )
+            )
+        )
+
+        if callable(
+            snapshot_func
+        ):
+            try:
+                snapshot = (
+                    snapshot_func(
+                        cur,
+                        int(
+                            row[
+                                "id"
+                            ]
+                        ),
+                    )
+                    or {}
+                )
+
+                row[
+                    "material_cost"
+                ] = float(
+                    _suite_dec(
+                        snapshot.get(
+                            "material_cost"
+                        )
+                    )
+                )
+
+                row[
+                    "labor_cost"
+                ] = float(
+                    _suite_dec(
+                        snapshot.get(
+                            "labor_cost"
+                        )
+                    )
+                )
+
+                if snapshot.get(
+                    "estimated_profit"
+                ) is not None:
+                    row[
+                        "estimated_profit"
+                    ] = float(
+                        _suite_dec(
+                            snapshot.get(
+                                "estimated_profit"
+                            )
+                        )
+                    )
+
+                else:
+                    row[
+                        "estimated_profit"
+                    ] = float(
+                        _suite_dec(
+                            row.get(
+                                "price"
+                            )
+                        )
+                        - _suite_dec(
+                            row[
+                                "material_cost"
+                            ]
+                        )
+                        - _suite_dec(
+                            row[
+                                "labor_cost"
+                            ]
+                        )
+                    )
+
+            except Exception:
+                pass
+
+    return rows
+
+
+def _suite_reports_overview(
+    cur,
+    days: int,
+) -> dict:
+    orders = (
+        _suite_report_orders(
+            cur,
+            days,
+        )
+    )
+
+    turnover = sum(
+        (
+            _suite_dec(
+                row.get(
+                    "price"
+                )
+            )
+            for row
+            in orders
+        ),
+        _SuiteDecimal("0"),
+    )
+
+    paid = sum(
+        (
+            _suite_dec(
+                row.get(
+                    "paid_amount"
+                )
+            )
+            for row
+            in orders
+        ),
+        _SuiteDecimal("0"),
+    )
+
+    profit = sum(
+        (
+            _suite_dec(
+                row.get(
+                    "estimated_profit"
+                )
+            )
+            for row
+            in orders
+        ),
+        _SuiteDecimal("0"),
+    )
+
+    material_cost = sum(
+        (
+            _suite_dec(
+                row.get(
+                    "material_cost"
+                )
+            )
+            for row
+            in orders
+        ),
+        _SuiteDecimal("0"),
+    )
+
+    labor_cost = sum(
+        (
+            _suite_dec(
+                row.get(
+                    "labor_cost"
+                )
+            )
+            for row
+            in orders
+        ),
+        _SuiteDecimal("0"),
+    )
+
+    client_map = {}
+
+    source_map = {}
+
+    for row in orders:
+        client = str(
+            row.get(
+                "client_name"
+            )
+            or "Bez klienta"
+        )
+
+        client_entry = (
+            client_map
+            .setdefault(
+                client,
+                {
+                    "client":
+                        client,
+                    "orders":
+                        0,
+                    "turnover":
+                        0.0,
+                    "profit":
+                        0.0,
+                },
+            )
+        )
+
+        client_entry[
+            "orders"
+        ] += 1
+
+        client_entry[
+            "turnover"
+        ] += float(
+            _suite_dec(
+                row.get(
+                    "price"
+                )
+            )
+        )
+
+        client_entry[
+            "profit"
+        ] += float(
+            _suite_dec(
+                row.get(
+                    "estimated_profit"
+                )
+            )
+        )
+
+        source = str(
+            row.get(
+                "source"
+            )
+            or "Ręczne"
+        )
+
+        source_entry = (
+            source_map
+            .setdefault(
+                source,
+                {
+                    "source":
+                        source,
+                    "orders":
+                        0,
+                    "turnover":
+                        0.0,
+                },
+            )
+        )
+
+        source_entry[
+            "orders"
+        ] += 1
+
+        source_entry[
+            "turnover"
+        ] += float(
+            _suite_dec(
+                row.get(
+                    "price"
+                )
+            )
+        )
+
+    top_clients = sorted(
+        client_map.values(),
+        key=lambda item: (
+            item[
+                "turnover"
+            ]
+        ),
+        reverse=True,
+    )[:10]
+
+    sources = sorted(
+        source_map.values(),
+        key=lambda item: (
+            item[
+                "turnover"
+            ]
+        ),
+        reverse=True,
+    )
+
+    average_order = (
+        turnover
+        / _SuiteDecimal(
+            len(
+                orders
+            )
+        )
+        if orders
+        else _SuiteDecimal("0")
+    )
+
+    return {
+        "days":
+            days,
+        "orders_count":
+            len(
+                orders
+            ),
+        "turnover":
+            float(
+                turnover
+            ),
+        "paid":
+            float(
+                paid
+            ),
+        "outstanding":
+            float(
+                max(
+                    turnover
+                    - paid,
+                    _SuiteDecimal("0"),
+                )
+            ),
+        "material_cost":
+            float(
+                material_cost
+            ),
+        "labor_cost":
+            float(
+                labor_cost
+            ),
+        "estimated_profit":
+            float(
+                profit
+            ),
+        "margin_percent":
+            (
+                float(
+                    profit
+                    / turnover
+                    * _SuiteDecimal("100")
+                )
+                if turnover > 0
+                else 0.0
+            ),
+        "average_order":
+            float(
+                average_order
+            ),
+        "top_clients":
+            top_clients,
+        "sources":
+            sources,
+        "orders":
+            orders[:100],
+    }
+
+
+def _suite_health(
+    cur,
+) -> dict:
+    checks = []
+
+    try:
+        cur.execute(
+            "SELECT 1 AS ok"
+        )
+
+        checks.append(
+            {
+                "name":
+                    "Baza danych",
+                "status":
+                    "ok",
+                "detail":
+                    "PostgreSQL odpowiada",
+            }
+        )
+
+    except Exception as exc:
+        checks.append(
+            {
+                "name":
+                    "Baza danych",
+                "status":
+                    "error",
+                "detail":
+                    str(
+                        exc
+                    )[:300],
+            }
+        )
+
+    woo_status = (
+        "ok"
+        if (
+            _suite_os.environ.get(
+                "WC_URL"
+            )
+            and _suite_os.environ.get(
+                "WC_CONSUMER_KEY"
+            )
+            and _suite_os.environ.get(
+                "WC_CONSUMER_SECRET"
+            )
+        )
+        else "warning"
+    )
+
+    checks.append(
+        {
+            "name":
+                "WooCommerce API",
+            "status":
+                woo_status,
+            "detail":
+                (
+                    "Klucze API są skonfigurowane"
+                    if woo_status
+                    == "ok"
+                    else "Brak pełnej konfiguracji WooCommerce"
+                ),
+        }
+    )
+
+    ai_key_func = globals().get(
+        "_ai_key"
+    )
+
+    ai_configured = False
+
+    if callable(
+        ai_key_func
+    ):
+        try:
+            ai_configured = bool(
+                ai_key_func()
+            )
+        except Exception:
+            ai_configured = False
+
+    checks.append(
+        {
+            "name":
+                "OpenAI API",
+            "status":
+                (
+                    "ok"
+                    if ai_configured
+                    else "warning"
+                ),
+            "detail":
+                (
+                    "Klucz API jest skonfigurowany"
+                    if ai_configured
+                    else "Brak klucza OpenAI API"
+                ),
+        }
+    )
+
+    data_root = _SuitePath(
+        "/srv/yokai-data"
+    )
+
+    try:
+        usage = (
+            _suite_shutil
+            .disk_usage(
+                data_root
+            )
+        )
+
+        checks.append(
+            {
+                "name":
+                    "Dysk danych",
+                "status":
+                    (
+                        "warning"
+                        if (
+                            usage.free
+                            / usage.total
+                        )
+                        < 0.10
+                        else "ok"
+                    ),
+                "detail":
+                    (
+                        f"Wolne "
+                        f"{usage.free / 1024**3:.1f} GB "
+                        f"z {usage.total / 1024**3:.1f} GB"
+                    ),
+            }
+        )
+
+    except Exception as exc:
+        checks.append(
+            {
+                "name":
+                    "Dysk danych",
+                "status":
+                    "error",
+                "detail":
+                    str(
+                        exc
+                    )[:300],
+            }
+        )
+
+    for directory in (
+        "svg",
+        "pdf",
+        "ai",
+        "backups",
+    ):
+        path = (
+            data_root
+            / directory
+        )
+
+        checks.append(
+            {
+                "name":
+                    f"Katalog {directory}",
+                "status":
+                    (
+                        "ok"
+                        if path.exists()
+                        and path.is_dir()
+                        else "warning"
+                    ),
+                "detail":
+                    str(
+                        path
+                    ),
+            }
+        )
+
+    overall = (
+        "error"
+        if any(
+            item[
+                "status"
+            ]
+            == "error"
+            for item
+            in checks
+        )
+        else (
+            "warning"
+            if any(
+                item[
+                    "status"
+                ]
+                == "warning"
+                for item
+                in checks
+            )
+            else "ok"
+        )
+    )
+
+    return {
+        "overall":
+            overall,
+        "checks":
+            checks,
+    }
+
+
+def _suite_backup_dir() -> _SuitePath:
+    path = _SuitePath(
+        "/srv/yokai-data/backups"
+    )
+
+    path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return path
+
+
+def _suite_backup_files() -> list[dict]:
+    backup_dir = (
+        _suite_backup_dir()
+    )
+
+    rows = []
+
+    for path in sorted(
+        backup_dir.glob(
+            "yokai-control-*.zip"
+        ),
+        key=lambda item: (
+            item.stat().st_mtime
+        ),
+        reverse=True,
+    ):
+        stat = path.stat()
+
+        rows.append(
+            {
+                "name":
+                    path.name,
+                "size_bytes":
+                    stat.st_size,
+                "created_at":
+                    _SuiteDateTime
+                    .fromtimestamp(
+                        stat.st_mtime
+                    )
+                    .isoformat(),
+            }
+        )
+
+    return rows
+
+
+def _suite_create_backup(
+    cur,
+) -> dict:
+    backup_dir = (
+        _suite_backup_dir()
+    )
+
+    timestamp = (
+        _SuiteDateTime
+        .now()
+        .strftime(
+            "%Y%m%d-%H%M%S"
+        )
+    )
+
+    target = (
+        backup_dir
+        / (
+            f"yokai-control-"
+            f"{timestamp}.zip"
+        )
+    )
+
+    cur.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE
+            table_schema = 'public'
+            AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """
+    )
+
+    tables = [
+        str(
+            row[
+                "table_name"
+            ]
+        )
+        for row
+        in cur.fetchall()
+    ]
+
+    manifest = {
+        "created_at":
+            _SuiteDateTime
+            .now()
+            .isoformat(),
+        "version":
+            "0.33.0",
+        "tables":
+            tables,
+    }
+
+    with _suite_zipfile.ZipFile(
+        target,
+        "w",
+        compression=
+            _suite_zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr(
+            "manifest.json",
+            _suite_json.dumps(
+                manifest,
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
+        for table in tables:
+            safe_table = (
+                table.replace(
+                    '"',
+                    '""',
+                )
+            )
+
+            cur.execute(
+                f'SELECT * '
+                f'FROM "{safe_table}"'
+            )
+
+            rows = [
+                {
+                    str(
+                        key
+                    ):
+                        _suite_jsonable(
+                            value
+                        )
+                    for key, value
+                    in dict(
+                        row
+                    ).items()
+                }
+                for row
+                in cur.fetchall()
+            ]
+
+            archive.writestr(
+                (
+                    f"database/"
+                    f"{table}.json"
+                ),
+                _suite_json.dumps(
+                    rows,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+        data_root = _SuitePath(
+            "/srv/yokai-data"
+        )
+
+        for directory in (
+            "svg",
+            "pdf",
+            "ai",
+        ):
+            root = (
+                data_root
+                / directory
+            )
+
+            if not root.exists():
+                continue
+
+            for file_path in (
+                root.rglob(
+                    "*"
+                )
+            ):
+                if not (
+                    file_path.is_file()
+                ):
+                    continue
+
+                try:
+                    archive.write(
+                        file_path,
+                        (
+                            "files/"
+                            + str(
+                                file_path
+                                .relative_to(
+                                    data_root
+                                )
+                            )
+                        ),
+                    )
+                except Exception:
+                    pass
+
+    retention = int(
+        _suite_setting(
+            cur,
+            "backup_retention",
+            10,
+        )
+        or 10
+    )
+
+    backups = sorted(
+        backup_dir.glob(
+            "yokai-control-*.zip"
+        ),
+        key=lambda item: (
+            item.stat().st_mtime
+        ),
+        reverse=True,
+    )
+
+    for old in (
+        backups[
+            max(
+                retention,
+                1,
+            ):
+        ]
+    ):
+        old.unlink(
+            missing_ok=True
+        )
+
+    stat = target.stat()
+
+    return {
+        "name":
+            target.name,
+        "size_bytes":
+            stat.st_size,
+        "created_at":
+            _SuiteDateTime
+            .fromtimestamp(
+                stat.st_mtime
+            )
+            .isoformat(),
+    }
+
+
+# W v0.25 worker WooCommerce odwołuje się do nazwy globalnej.
+# Redefinicja sprawia, że interwał jest czytany z Ustawień podczas startu.
+def _woo_background_worker() -> None:
+    _woo_time.sleep(
+        45
+    )
+
+    while True:
+        try:
+            _woo_sync_recent_known(
+                "background"
+            )
+
+        except Exception as exc:
+            print(
+                "YOKAI Woo automation:",
+                str(
+                    exc
+                )[:500],
+                flush=True,
+            )
+
+        interval = 600
+
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    _suite_schema(
+                        cur
+                    )
+
+                    interval = int(
+                        _suite_setting(
+                            cur,
+                            "woo_sync_interval_seconds",
+                            600,
+                        )
+                        or 600
+                    )
+
+                conn.commit()
+
+        except Exception:
+            interval = 600
+
+        interval = max(
+            60,
+            min(
+                interval,
+                86400,
+            ),
+        )
+
+        _woo_time.sleep(
+            interval
+        )
+
+
+@app.on_event("startup")
+def startup_business_control_suite_v033():
+    _suite_backup_dir()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _suite_schema(
+                cur
+            )
+
+        conn.commit()
+
+
+@app.get(
+    "/settings"
+)
+def get_suite_settings(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            values = (
+                _suite_all_settings(
+                    cur
+                )
+            )
+
+        conn.commit()
+
+    return {
+        "values":
+            values,
+        "defaults":
+            _SUITE_SETTINGS_DEFAULTS,
+    }
+
+
+@app.patch(
+    "/settings"
+)
+def update_suite_settings(
+    data: SuiteSettingsUpdate,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    allowed = set(
+        _SUITE_SETTINGS_DEFAULTS
+        .keys()
+    )
+
+    invalid = [
+        key
+        for key
+        in data.values.keys()
+        if key not in allowed
+    ]
+
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieznane ustawienia: "
+                + ", ".join(
+                    invalid
+                )
+            ),
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _suite_schema(
+                cur
+            )
+
+            for key, value in (
+                data.values.items()
+            ):
+                cur.execute(
+                    """
+                    INSERT INTO app_settings (
+                        key,
+                        value,
+                        updated_at
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        NOW()
+                    )
+                    ON CONFLICT (key)
+                    DO UPDATE SET
+                        value =
+                            EXCLUDED.value,
+                        updated_at =
+                            NOW()
+                    """,
+                    (
+                        key,
+                        Jsonb(
+                            value
+                        ),
+                    ),
+                )
+
+            values = (
+                _suite_all_settings(
+                    cur
+                )
+            )
+
+        conn.commit()
+
+    return {
+        "ok":
+            True,
+        "values":
+            values,
+    }
+
+
+@app.get(
+    "/orders/{order_id}/shop-production-spec"
+)
+def get_shop_production_spec(
+    order_id: int,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            cur.execute(
+                """
+                SELECT to_regclass(
+                    'public.woo_order_automation'
+                ) AS exists
+                """
+            )
+
+            exists = bool(
+                (
+                    cur.fetchone()
+                    or {}
+                ).get(
+                    "exists"
+                )
+            )
+
+            payload = None
+            woo_order_id = None
+            woo_order_number = None
+
+            if exists:
+                cur.execute(
+                    """
+                    SELECT
+                        payload,
+                        woo_order_id,
+                        woo_order_number
+                    FROM woo_order_automation
+                    WHERE
+                        local_order_id = %s
+                    LIMIT 1
+                    """,
+                    (
+                        order_id,
+                    ),
+                )
+
+                row = cur.fetchone()
+
+                if row is not None:
+                    payload = row.get(
+                        "payload"
+                    )
+
+                    woo_order_id = (
+                        row.get(
+                            "woo_order_id"
+                        )
+                    )
+
+                    woo_order_number = (
+                        row.get(
+                            "woo_order_number"
+                        )
+                    )
+
+            spec = (
+                _suite_shop_spec_from_payload(
+                    payload
+                )
+            )
+
+        conn.commit()
+
+    return {
+        "order_id":
+            order_id,
+        "woo_order_id":
+            woo_order_id,
+        "woo_order_number":
+            woo_order_number,
+        "available":
+            bool(
+                payload
+            ),
+        "spec":
+            spec,
+    }
+
+
+@app.get(
+    "/notifications"
+)
+def get_suite_notifications(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _suite_schema(
+                cur
+            )
+
+            items = (
+                _suite_notifications(
+                    cur
+                )
+            )
+
+        conn.commit()
+
+    counts = {
+        "high":
+            0,
+        "medium":
+            0,
+        "low":
+            0,
+    }
+
+    by_type = {}
+
+    for item in items:
+        severity = item.get(
+            "severity",
+            "low",
+        )
+
+        counts[
+            severity
+        ] = (
+            counts.get(
+                severity,
+                0,
+            )
+            + 1
+        )
+
+        notification_type = (
+            item.get(
+                "type"
+            )
+            or "other"
+        )
+
+        by_type[
+            notification_type
+        ] = (
+            by_type.get(
+                notification_type,
+                0,
+            )
+            + 1
+        )
+
+    return {
+        "count":
+            len(
+                items
+            ),
+        "severity":
+            counts,
+        "by_type":
+            by_type,
+        "items":
+            items,
+    }
+
+
+@app.get(
+    "/notifications/summary"
+)
+def get_suite_notifications_summary(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            items = (
+                _suite_notifications(
+                    cur
+                )
+            )
+
+    return {
+        "count":
+            len(
+                items
+            ),
+        "high":
+            sum(
+                1
+                for item
+                in items
+                if item.get(
+                    "severity"
+                )
+                == "high"
+            ),
+        "medium":
+            sum(
+                1
+                for item
+                in items
+                if item.get(
+                    "severity"
+                )
+                == "medium"
+            ),
+    }
+
+
+@app.get(
+    "/system/health"
+)
+def get_suite_system_health(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _suite_schema(
+                cur
+            )
+
+            health = (
+                _suite_health(
+                    cur
+                )
+            )
+
+        conn.commit()
+
+    health[
+        "backups"
+    ] = (
+        _suite_backup_files()
+        [:10]
+    )
+
+    return health
+
+
+@app.get(
+    "/system/backups"
+)
+def get_suite_backups(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    return {
+        "items":
+            _suite_backup_files()
+    }
+
+
+@app.post(
+    "/system/backups/create"
+)
+def create_suite_backup(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _suite_schema(
+                cur
+            )
+
+            created = (
+                _suite_create_backup(
+                    cur
+                )
+            )
+
+        conn.commit()
+
+    return {
+        "ok":
+            True,
+        "backup":
+            created,
+    }
+
+
+@app.get(
+    "/system/backups/{backup_name}/download"
+)
+def download_suite_backup(
+    backup_name: str,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    if (
+        not backup_name.startswith(
+            "yokai-control-"
+        )
+        or not backup_name.endswith(
+            ".zip"
+        )
+        or "/"
+        in backup_name
+        or "\\"
+        in backup_name
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieprawidłowa nazwa backupu"
+            ),
+        )
+
+    path = (
+        _suite_backup_dir()
+        / backup_name
+    )
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Backup nie istnieje"
+            ),
+        )
+
+    return _SuiteFileResponse(
+        path=str(
+            path
+        ),
+        media_type=
+            "application/zip",
+        filename=
+            backup_name,
+    )
+
+
+@app.get(
+    "/reports/overview"
+)
+def get_suite_reports_overview(
+    days: int = Query(
+        default=30,
+        ge=1,
+        le=3650,
+    ),
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            overview = (
+                _suite_reports_overview(
+                    cur,
+                    days,
+                )
+            )
+
+        conn.commit()
+
+    return overview
+
+
+@app.get(
+    "/reports/export.csv"
+)
+def export_suite_reports_csv(
+    days: int = Query(
+        default=30,
+        ge=1,
+        le=3650,
+    ),
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            rows = (
+                _suite_report_orders(
+                    cur,
+                    days,
+                )
+            )
+
+    output = (
+        _suite_io.StringIO()
+    )
+
+    writer = (
+        _suite_csv.writer(
+            output,
+            delimiter=";",
+        )
+    )
+
+    writer.writerow(
+        [
+            "Numer",
+            "Data",
+            "Klient",
+            "Nazwa",
+            "Status",
+            "Źródło",
+            "Wartość",
+            "Wpłacono",
+            "Koszt materiału",
+            "Koszt pracy",
+            "Szacowany zysk",
+        ]
+    )
+
+    for row in rows:
+        writer.writerow(
+            [
+                row.get(
+                    "order_number"
+                ),
+                _suite_jsonable(
+                    row.get(
+                        "created_at"
+                    )
+                ),
+                row.get(
+                    "client_name"
+                ),
+                row.get(
+                    "name"
+                ),
+                row.get(
+                    "status"
+                ),
+                row.get(
+                    "source"
+                ),
+                float(
+                    _suite_dec(
+                        row.get(
+                            "price"
+                        )
+                    )
+                ),
+                float(
+                    _suite_dec(
+                        row.get(
+                            "paid_amount"
+                        )
+                    )
+                ),
+                float(
+                    _suite_dec(
+                        row.get(
+                            "material_cost"
+                        )
+                    )
+                ),
+                float(
+                    _suite_dec(
+                        row.get(
+                            "labor_cost"
+                        )
+                    )
+                ),
+                float(
+                    _suite_dec(
+                        row.get(
+                            "estimated_profit"
+                        )
+                    )
+                ),
+            ]
+        )
+
+    data = output.getvalue()
+
+    filename = (
+        f"yokai-report-"
+        f"{days}d-"
+        f"{_SuiteDate.now().isoformat()}.csv"
+    )
+
+    return _SuiteResponse(
+        content=(
+            "\ufeff"
+            + data
+        ).encode(
+            "utf-8"
+        ),
+        media_type=
+            "text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                (
+                    f'attachment; '
+                    f'filename="{filename}"'
+                )
+        },
+    )

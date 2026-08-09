@@ -1,5 +1,7 @@
 "use client";
 
+import { ShopProductionSpec } from "../../../components/shop-production-spec";
+
 import { OrderAiProjects } from "../../../components/order-ai-projects";
 
 import { OrderWooAutomation } from "../../../components/order-woo-automation";
@@ -563,6 +565,10 @@ export default function OrderDetailsPage() {
             />
 
             <OrderWooAutomation
+              orderId={order.id}
+            />
+
+            <ShopProductionSpec
               orderId={order.id}
             />
 
