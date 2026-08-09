@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="/opt/yokai-os"
+SNAP_ROOT="/srv/yokai-data/backups/deploy-snapshots"
+
+snapshot="${1:-}"
+
+if [ -z "$snapshot" ]; then
+  snapshot="$(
+    find "$SNAP_ROOT" \
+      -mindepth 1 \
+      -maxdepth 1 \
+      -type d \
+      | sort \
+      | tail -n 1
+  )"
+fi
+
+if [ -z "$snapshot" ] \
+  || [ ! -d "$snapshot" ]
+then
+  echo "Brak snapshotu do rollbacku."
+  exit 1
+fi
+
+case "$snapshot" in
+  "$SNAP_ROOT"/*)
+    ;;
+  *)
+    echo "Nieprawidłowa ścieżka snapshotu."
+    exit 1
+    ;;
+esac
+
+head_file="$snapshot/git-head.txt"
+
+if [ ! -f "$head_file" ]; then
+  echo "Snapshot nie zawiera git-head.txt."
+  exit 1
+fi
+
+head="$(
+  cat "$head_file"
+)"
+
+cd "$ROOT"
+
+echo "===== ROLLBACK DO $head ====="
+
+git reset --hard "$head"
+
+git clean -fd \
+  backend \
+  frontend \
+  ops \
+  >/dev/null \
+  2>&1 \
+  || true
+
+docker compose config \
+  --quiet
+
+docker compose build \
+  backend frontend
+
+docker compose up -d \
+  --force-recreate \
+  backend frontend
+
+sleep 15
+
+echo
+echo "===== KONTROLA PO ROLLBACKU ====="
+
+if /usr/local/bin/yokai-check; then
+  echo
+  echo "ROLLBACK: OK"
+else
+  echo
+  echo "ROLLBACK wykonany, ale kontrola nadal zgłasza błąd."
+  exit 1
+fi

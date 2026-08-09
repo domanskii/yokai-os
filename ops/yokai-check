@@ -1,0 +1,423 @@
+#!/usr/bin/env bash
+
+set -u
+
+ROOT="/opt/yokai-os"
+BASE_URL="${YOKAI_BASE_URL:-https://os.yokaiwrap.pl}"
+
+cd "$ROOT" || {
+  echo "Nie znaleziono $ROOT"
+  exit 1
+}
+
+PASS=0
+WARN=0
+FAIL=0
+
+ok() {
+  PASS=$((PASS + 1))
+  printf "%-34s OK\n" "$1"
+}
+
+warn() {
+  WARN=$((WARN + 1))
+  printf "%-34s WARN  %s\n" "$1" "$2"
+}
+
+fail() {
+  FAIL=$((FAIL + 1))
+  printf "%-34s FAIL  %s\n" "$1" "$2"
+}
+
+http_code() {
+  curl -k -sS \
+    --connect-timeout 5 \
+    --max-time 15 \
+    -o /dev/null \
+    -w "%{http_code}" \
+    "$1" \
+    2>/dev/null \
+    || true
+}
+
+check_page() {
+  local label="$1"
+  local path="$2"
+  local code
+
+  code="$(http_code "${BASE_URL}${path}")"
+
+  if [ "$code" = "200" ]; then
+    ok "$label"
+  else
+    fail "$label" "HTTP ${code:-000}"
+  fi
+}
+
+check_protected_api() {
+  local label="$1"
+  local path="$2"
+  local code
+
+  code="$(http_code "${BASE_URL}/api${path}")"
+
+  if [ "$code" = "200" ] || [ "$code" = "401" ]; then
+    ok "$label"
+  else
+    fail "$label" "HTTP ${code:-000}"
+  fi
+}
+
+echo "=================================================="
+echo " YOKAI CHECK"
+echo "=================================================="
+echo
+
+echo "===== KONTENERY ====="
+
+for service in backend frontend database; do
+  cid="$(docker compose ps -q "$service" 2>/dev/null || true)"
+
+  if [ -z "$cid" ]; then
+    fail "Container: $service" "brak kontenera"
+    continue
+  fi
+
+  running="$(
+    docker inspect \
+      -f '{{.State.Running}}' \
+      "$cid" \
+      2>/dev/null \
+      || true
+  )"
+
+  if [ "$running" = "true" ]; then
+    ok "Container: $service"
+  else
+    fail "Container: $service" "nie działa"
+  fi
+done
+
+echo
+echo "===== FRONTEND ====="
+
+check_page "Dashboard" "/"
+check_page "Produkcja" "/production"
+check_page "Zamówienia" "/orders"
+check_page "Biblioteka SVG" "/library"
+check_page "Kalkulator" "/calculator"
+check_page "Materiały" "/materials"
+check_page "Klienci" "/clients"
+check_page "Finanse" "/finance"
+check_page "AI Studio" "/ai-studio"
+check_page "Ustawienia" "/settings"
+check_page "Powiadomienia" "/notifications"
+check_page "System" "/system"
+check_page "Raporty" "/reports"
+
+echo
+echo "===== BACKEND / ROUTES ====="
+
+code="$(http_code "${BASE_URL}/api/")"
+
+if [ "$code" = "200" ]; then
+  ok "API root"
+else
+  fail "API root" "HTTP ${code:-000}"
+fi
+
+openapi="$(
+  curl -k -fsS \
+    --connect-timeout 5 \
+    --max-time 20 \
+    "${BASE_URL}/api/openapi.json" \
+    2>/dev/null \
+    || true
+)"
+
+if [ -n "$openapi" ]; then
+  ok "OpenAPI"
+
+  for route in \
+    '"/orders"' \
+    '"/svg-assets"' \
+    '"/ai-projects"' \
+    '"/settings"' \
+    '"/notifications"' \
+    '"/system/health"' \
+    '"/reports/overview"'
+  do
+    if printf '%s' "$openapi" | grep -Fq "$route"; then
+      ok "Route ${route//\"/}"
+    else
+      fail "Route ${route//\"/}" "brak w OpenAPI"
+    fi
+  done
+else
+  fail "OpenAPI" "nie udało się pobrać"
+fi
+
+check_protected_api "Orders API" "/orders"
+check_protected_api "SVG API" "/svg-assets"
+check_protected_api "AI Studio API" "/ai-studio/status"
+check_protected_api "Settings API" "/settings"
+check_protected_api "Notifications API" "/notifications"
+check_protected_api "System API" "/system/health"
+check_protected_api "Reports API" "/reports/overview"
+
+echo
+echo "===== POSTGRESQL ====="
+
+if docker compose exec -T backend python - <<'PY' >/tmp/yokai-db-check.out 2>&1
+import os
+import psycopg
+
+url = os.environ.get("DATABASE_URL", "").strip()
+if not url:
+    raise SystemExit("DATABASE_URL is empty")
+
+with psycopg.connect(
+    url,
+    connect_timeout=5,
+) as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+        value = cur.fetchone()[0]
+
+if value != 1:
+    raise SystemExit("Unexpected database response")
+
+print("OK")
+PY
+then
+  ok "Database query"
+else
+  detail="$(tail -n 1 /tmp/yokai-db-check.out 2>/dev/null || true)"
+  fail "Database query" "${detail:-błąd połączenia}"
+fi
+
+rm -f /tmp/yokai-db-check.out
+
+echo
+echo "===== STORAGE ====="
+
+for dir in svg pdf ai backups; do
+  host_path="/srv/yokai-data/$dir"
+
+  if [ ! -d "$host_path" ]; then
+    fail "Storage: $dir" "brak katalogu"
+    continue
+  fi
+
+  test_file="$host_path/.yokai-healthcheck-$$"
+
+  if printf 'YOKAI' > "$test_file" 2>/dev/null \
+    && grep -q 'YOKAI' "$test_file" 2>/dev/null
+  then
+    rm -f "$test_file"
+    ok "Storage: $dir"
+  else
+    rm -f "$test_file" 2>/dev/null || true
+    fail "Storage: $dir" "brak zapisu/odczytu"
+  fi
+done
+
+echo
+echo "===== DYSK ====="
+
+disk_info="$(
+  df -P /srv/yokai-data \
+    | awk 'NR==2 {print $5" "$4}'
+)"
+
+used_pct="$(
+  printf '%s' "$disk_info" \
+    | awk '{gsub("%","",$1); print $1}'
+)"
+
+free_kb="$(
+  printf '%s' "$disk_info" \
+    | awk '{print $2}'
+)"
+
+if [ -n "$used_pct" ] && [ "$used_pct" -lt 95 ]; then
+  free_gb="$(
+    awk \
+      -v kb="$free_kb" \
+      'BEGIN {printf "%.1f", kb/1024/1024}'
+  )"
+
+  ok "Disk free (${free_gb} GB)"
+else
+  fail "Disk space" "użycie ${used_pct:-?}%"
+fi
+
+echo
+echo "===== WOOCommerce ====="
+
+woo_result="$(
+  docker compose exec -T backend python - <<'PY' 2>/dev/null
+import base64
+import os
+import urllib.error
+import urllib.request
+
+url = os.environ.get("WC_URL", "").strip().rstrip("/")
+key = os.environ.get("WC_CONSUMER_KEY", "").strip()
+secret = os.environ.get("WC_CONSUMER_SECRET", "").strip()
+
+if not (url and key and secret):
+    print("SKIP:brak konfiguracji")
+    raise SystemExit(0)
+
+endpoint = url + "/wp-json/wc/v3/orders?per_page=1"
+token = base64.b64encode(
+    f"{key}:{secret}".encode()
+).decode()
+
+request = urllib.request.Request(
+    endpoint,
+    headers={
+        "Authorization": f"Basic {token}",
+        "User-Agent": "YOKAI-OS-Healthcheck/0.34",
+    },
+)
+
+try:
+    with urllib.request.urlopen(
+        request,
+        timeout=12,
+    ) as response:
+        print(f"HTTP:{response.status}")
+except urllib.error.HTTPError as exc:
+    print(f"HTTP:{exc.code}")
+except Exception as exc:
+    print("ERR:" + type(exc).__name__)
+PY
+)"
+
+case "$woo_result" in
+  HTTP:200)
+    ok "WooCommerce API"
+    ;;
+  SKIP:*)
+    warn "WooCommerce API" "${woo_result#SKIP:}"
+    ;;
+  *)
+    warn "WooCommerce API" "${woo_result:-brak odpowiedzi}"
+    ;;
+esac
+
+echo
+echo "===== OpenAI ====="
+
+openai_result="$(
+  docker compose exec -T backend python - <<'PY' 2>/dev/null
+import os
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+key = os.environ.get(
+    "OPENAI_API_KEY",
+    "",
+).strip()
+
+if not key:
+    p = Path(
+        "/srv/yokai-data/ai/openai-api-key"
+    )
+    if p.exists():
+        key = p.read_text(
+            encoding="utf-8"
+        ).strip()
+
+if not key:
+    print("SKIP:brak klucza")
+    raise SystemExit(0)
+
+request = urllib.request.Request(
+    "https://api.openai.com/v1/models",
+    headers={
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "YOKAI-OS-Healthcheck/0.34",
+    },
+)
+
+try:
+    with urllib.request.urlopen(
+        request,
+        timeout=12,
+    ) as response:
+        print(f"HTTP:{response.status}")
+except urllib.error.HTTPError as exc:
+    print(f"HTTP:{exc.code}")
+except Exception as exc:
+    print("ERR:" + type(exc).__name__)
+PY
+)"
+
+case "$openai_result" in
+  HTTP:200)
+    ok "OpenAI API"
+    ;;
+  HTTP:429)
+    warn "OpenAI API" "HTTP 429 — autoryzacja działa, limit/quota"
+    ;;
+  SKIP:*)
+    warn "OpenAI API" "${openai_result#SKIP:}"
+    ;;
+  *)
+    warn "OpenAI API" "${openai_result:-brak odpowiedzi}"
+    ;;
+esac
+
+echo
+echo "===== STAN BACKENDU ====="
+
+backend_cid="$(
+  docker compose ps -q backend     2>/dev/null     || true
+)"
+
+backend_running="false"
+
+if [ -n "$backend_cid" ]; then
+  backend_running="$(
+    docker inspect       -f '{{.State.Running}}'       "$backend_cid"       2>/dev/null       || true
+  )"
+fi
+
+api_code="$(
+  http_code "${BASE_URL}/api/"
+)"
+
+if [ "$backend_running" = "true" ]   && [ "$api_code" = "200" ]
+then
+  ok "Backend startup"
+else
+  fail     "Backend startup"     "container=${backend_running:-?}, API=${api_code:-000}"
+fi
+
+recent_logs="$(
+  docker compose logs     --since=2m     backend     2>/dev/null     || true
+)"
+
+if printf '%s' "$recent_logs"   | grep -q     'Application startup failed'
+then
+  fail     "Backend recent logs"     "wykryto startup failure w ostatnich 2 min"
+else
+  ok "Backend recent logs"
+fi
+echo
+echo "=================================================="
+printf " OK: %-3s   WARN: %-3s   FAIL: %-3s\n" \
+  "$PASS" \
+  "$WARN" \
+  "$FAIL"
+echo "=================================================="
+
+if [ "$FAIL" -gt 0 ]; then
+  exit 1
+fi
+
+exit 0

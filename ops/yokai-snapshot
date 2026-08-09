@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="/opt/yokai-os"
+SNAP_ROOT="/srv/yokai-data/backups/deploy-snapshots"
+
+cd "$ROOT"
+
+mkdir -p "$SNAP_ROOT"
+
+tracked_dirty="$(
+  git status \
+    --porcelain \
+    --untracked-files=no
+)"
+
+if [ -n "$tracked_dirty" ]; then
+  echo "STOP: repo ma niezacommitowane zmiany w śledzonych plikach."
+  echo "Snapshot wdrożeniowy wymaga czystego HEAD."
+  exit 1
+fi
+
+stamp="$(
+  date +%Y%m%d-%H%M%S
+)"
+
+dir="$SNAP_ROOT/$stamp"
+
+mkdir -p "$dir"
+
+git rev-parse HEAD \
+  > "$dir/git-head.txt"
+
+git status --short \
+  > "$dir/git-status.txt"
+
+docker compose ps \
+  > "$dir/compose-ps.txt" \
+  2>&1 \
+  || true
+
+docker compose images \
+  > "$dir/compose-images.txt" \
+  2>&1 \
+  || true
+
+if docker compose ps -q database >/dev/null 2>&1; then
+  docker compose exec -T database \
+    sh -lc \
+    'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+    | gzip -1 \
+    > "$dir/database.sql.gz"
+fi
+
+cat > "$dir/README.txt" <<EOF
+YOKAI OS deployment snapshot
+Created: $(date -Is)
+Git HEAD: $(cat "$dir/git-head.txt")
+
+Rollback kodu:
+  yokai-rollback "$dir"
+
+Baza:
+  database.sql.gz jest awaryjnym dumpem.
+  Nie jest automatycznie przywracana podczas rollbacku kodu.
+EOF
+
+echo "$dir"

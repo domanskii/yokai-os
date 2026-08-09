@@ -840,7 +840,7 @@ export default function AIStudioPage() {
 
   return (
     <div className="min-h-screen bg-[#080b10] text-white">
-      <YokaiSidebar activePath="/ai-studio" actionLabel="Nowy projekt" actionHref="/ai-studio?new=1" />
+      <YokaiSidebar />
 
       {mobile && (
         <div className="fixed inset-0 z-[100] lg:hidden">

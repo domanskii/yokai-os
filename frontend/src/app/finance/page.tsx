@@ -387,7 +387,7 @@ export default function FinancePage() {
 
   return (
     <div className="min-h-screen bg-[#080b10] text-white">
-      <YokaiSidebar activePath="/finance" />
+      <YokaiSidebar />
 
       {mobileOpen && (
         <div className="fixed inset-0 z-[90] lg:hidden">
