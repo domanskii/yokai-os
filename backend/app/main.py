@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.23.0")
+app = FastAPI(title="YOKAI OS API", version="0.24.0")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.23.0",
+        "version": "0.24.0",
         "status": "running",
     }
 
@@ -671,7 +671,7 @@ def _wc_fetch_orders(limit: int) -> list[dict]:
             headers={
                 "Authorization": f"Basic {authorization}",
                 "Accept": "application/json",
-                "User-Agent": "YOKAI-OS/0.23",
+                "User-Agent": "YOKAI-OS/0.24",
             },
             method="GET",
         )
@@ -1255,7 +1255,7 @@ def _wc_fetch_single_order(woocommerce_order_id: int) -> dict:
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.23",
+            "User-Agent": "YOKAI-OS/0.24",
         },
         method="GET",
     )
@@ -1409,7 +1409,7 @@ def _wc_fetch_optional_resource(
         headers={
             "Authorization": f"Basic {authorization}",
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.23",
+            "User-Agent": "YOKAI-OS/0.24",
         },
         method="GET",
     )
@@ -4051,7 +4051,7 @@ def lookup_company_by_nip(
         api_url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "YOKAI-OS/0.23",
+            "User-Agent": "YOKAI-OS/0.24",
         },
     )
 
@@ -9665,3 +9665,1122 @@ def get_order_activity(
         dict(row)
         for row in rows
     ]
+
+# === YOKAI DAILY COMMAND CENTER V0.24 ===
+
+
+class DashboardQuickAction(BaseModel):
+    action: str = Field(
+        min_length=1,
+        max_length=40,
+    )
+
+
+_DASHBOARD_QUICK_ACTIONS = {
+    "move_today",
+    "move_tomorrow",
+    "next_status",
+    "mark_ready",
+    "mark_paid",
+    "mark_fulfilled",
+}
+
+
+def _dashboard_column_exists(
+    cur,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE
+                table_schema = 'public'
+                AND table_name = %s
+                AND column_name = %s
+        ) AS exists
+        """,
+        (
+            table_name,
+            column_name,
+        ),
+    )
+
+    row = (
+        cur.fetchone()
+        or {}
+    )
+
+    return bool(
+        row.get(
+            "exists"
+        )
+    )
+
+
+def _dashboard_low_stock(
+    cur,
+) -> list[dict]:
+    threshold_candidates = [
+        "low_stock_threshold_m",
+        "low_threshold_m",
+        "low_stock_threshold",
+        "low_threshold",
+    ]
+
+    threshold_column = None
+
+    for column_name in threshold_candidates:
+        if _dashboard_column_exists(
+            cur,
+            "materials",
+            column_name,
+        ):
+            threshold_column = (
+                column_name
+            )
+            break
+
+    if threshold_column is None:
+        return []
+
+    cur.execute(
+        f"""
+        SELECT
+            id,
+            name,
+            color_name,
+            color_code,
+            stock_length_m,
+            {threshold_column}
+                AS threshold_m
+        FROM materials
+        WHERE
+            is_archived = FALSE
+            AND COALESCE(
+                stock_length_m,
+                0
+            ) <= COALESCE(
+                {threshold_column},
+                0
+            )
+            AND COALESCE(
+                {threshold_column},
+                0
+            ) > 0
+        ORDER BY
+            COALESCE(
+                stock_length_m,
+                0
+            ) ASC,
+            name
+        LIMIT 30
+        """
+    )
+
+    rows = cur.fetchall()
+
+    result = []
+
+    for row in rows:
+        item = dict(
+            row
+        )
+
+        item[
+            "stock_length_m"
+        ] = _ops_number(
+            item.get(
+                "stock_length_m"
+            )
+        )
+
+        item[
+            "threshold_m"
+        ] = _ops_number(
+            item.get(
+                "threshold_m"
+            )
+        )
+
+        result.append(
+            item
+        )
+
+    return result
+
+
+def _dashboard_priority_weight(
+    value: object,
+) -> int:
+    return {
+        "urgent": 0,
+        "high": 1,
+        "normal": 2,
+        "low": 3,
+    }.get(
+        str(value or "normal"),
+        4,
+    )
+
+
+def _dashboard_order_sort_key(
+    item: dict,
+) -> tuple:
+    deadline = item.get(
+        "deadline"
+    )
+
+    deadline_key = (
+        str(deadline)
+        if deadline
+        else "9999-12-31"
+    )
+
+    return (
+        0
+        if item.get(
+            "is_overdue"
+        )
+        else 1,
+        _dashboard_priority_weight(
+            item.get(
+                "priority"
+            )
+        ),
+        0
+        if item.get(
+            "production_bucket"
+        ) == "today"
+        else 1,
+        deadline_key,
+        str(
+            item.get(
+                "created_at"
+            )
+            or ""
+        ),
+    )
+
+
+def _dashboard_order_row(
+    cur,
+    row: dict,
+) -> dict:
+    item = dict(
+        row
+    )
+
+    item[
+        "id"
+    ] = int(
+        item[
+            "id"
+        ]
+    )
+
+    item[
+        "price"
+    ] = _ops_money(
+        item.get(
+            "price"
+        )
+    )
+
+    item[
+        "paid_amount"
+    ] = _ops_money(
+        item.get(
+            "paid_amount"
+        )
+    )
+
+    item[
+        "is_overdue"
+    ] = _ops_is_overdue(
+        item.get(
+            "deadline"
+        ),
+        item.get(
+            "status"
+        ),
+    )
+
+    item[
+        "is_unpaid"
+    ] = (
+        _ops_decimal(
+            item.get(
+                "price"
+            )
+        )
+        > _ops_decimal(
+            item.get(
+                "paid_amount"
+            )
+        )
+    )
+
+    item[
+        "missing_client"
+    ] = (
+        item.get(
+            "client_id"
+        )
+        is None
+    )
+
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM svg_assets
+            WHERE
+                order_id = %s
+                AND is_archived = FALSE
+        ) AS has_svg
+        """,
+        (
+            item[
+                "id"
+            ],
+        ),
+    )
+
+    svg_row = (
+        cur.fetchone()
+        or {}
+    )
+
+    item[
+        "missing_svg"
+    ] = not bool(
+        svg_row.get(
+            "has_svg"
+        )
+    )
+
+    try:
+        snapshot = (
+            _ops_order_snapshot(
+                cur,
+                item[
+                    "id"
+                ],
+            )
+        )
+
+        item[
+            "estimated_profit"
+        ] = snapshot.get(
+            "estimated_profit",
+            0,
+        )
+
+        item[
+            "margin_percent"
+        ] = snapshot.get(
+            "margin_percent",
+            0,
+        )
+
+    except Exception:
+        item[
+            "estimated_profit"
+        ] = 0
+
+        item[
+            "margin_percent"
+        ] = 0
+
+    return item
+
+
+@app.on_event("startup")
+def startup_daily_command_center():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                CREATE OR REPLACE FUNCTION
+                    yokai_checklist_auto_ready()
+                RETURNS TRIGGER AS $$
+                DECLARE
+                    target_order_id BIGINT;
+                    total_count INTEGER;
+                    open_count INTEGER;
+                BEGIN
+                    IF TG_OP = 'DELETE'
+                    THEN
+                        target_order_id :=
+                            OLD.order_id;
+                    ELSE
+                        target_order_id :=
+                            NEW.order_id;
+                    END IF;
+
+                    SELECT
+                        COUNT(*),
+                        COUNT(*) FILTER (
+                            WHERE is_done = FALSE
+                        )
+                    INTO
+                        total_count,
+                        open_count
+                    FROM order_checklist_items
+                    WHERE
+                        order_id =
+                            target_order_id;
+
+                    IF
+                        total_count > 0
+                        AND open_count = 0
+                    THEN
+                        UPDATE orders
+                        SET
+                            status = 'Gotowe',
+                            fulfillment_status =
+                                CASE
+                                    WHEN
+                                        fulfillment_method
+                                        IN (
+                                            'shipping',
+                                            'pickup'
+                                        )
+                                    THEN 'ready'
+                                    ELSE
+                                        fulfillment_status
+                                END,
+                            updated_at = NOW()
+                        WHERE
+                            id = target_order_id
+                            AND status NOT IN (
+                                'Gotowe',
+                                'Zrealizowane',
+                                'Anulowane'
+                            );
+                    END IF;
+
+                    IF TG_OP = 'DELETE'
+                    THEN
+                        RETURN OLD;
+                    END IF;
+
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+
+            cur.execute(
+                """
+                DROP TRIGGER IF EXISTS
+                    order_checklist_auto_ready
+                ON order_checklist_items
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TRIGGER
+                    order_checklist_auto_ready
+                AFTER INSERT OR UPDATE OR DELETE
+                ON order_checklist_items
+                FOR EACH ROW
+                EXECUTE FUNCTION
+                    yokai_checklist_auto_ready()
+                """
+            )
+
+        conn.commit()
+
+
+@app.get(
+    "/dashboard/today"
+)
+def get_dashboard_today(
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            _ensure_workflow_schema(
+                cur
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    order_number,
+                    client_id,
+                    client_name,
+                    name,
+                    status,
+                    payment_status,
+                    price,
+                    paid_amount,
+                    deadline,
+                    priority,
+                    production_bucket,
+                    fulfillment_method,
+                    fulfillment_status,
+                    created_at
+                FROM orders
+                WHERE
+                    is_archived = FALSE
+                    AND status NOT IN (
+                        'Zrealizowane',
+                        'Anulowane'
+                    )
+                ORDER BY
+                    created_at ASC
+                LIMIT 500
+                """
+            )
+
+            rows = (
+                cur.fetchall()
+            )
+
+            orders = [
+                _dashboard_order_row(
+                    cur,
+                    row,
+                )
+                for row in rows
+            ]
+
+            low_stock = (
+                _dashboard_low_stock(
+                    cur
+                )
+            )
+
+        conn.commit()
+
+    today_orders = [
+        item
+        for item in orders
+        if item.get(
+            "production_bucket"
+        ) == "today"
+    ]
+
+    urgent_orders = [
+        item
+        for item in orders
+        if item.get(
+            "priority"
+        ) == "urgent"
+    ]
+
+    overdue_orders = [
+        item
+        for item in orders
+        if item.get(
+            "is_overdue"
+        )
+    ]
+
+    ready_orders = [
+        item
+        for item in orders
+        if item.get(
+            "fulfillment_status"
+        ) == "ready"
+    ]
+
+    unpaid_orders = [
+        item
+        for item in orders
+        if item.get(
+            "is_unpaid"
+        )
+    ]
+
+    missing_svg_orders = [
+        item
+        for item in orders
+        if item.get(
+            "missing_svg"
+        )
+    ]
+
+    missing_client_orders = [
+        item
+        for item in orders
+        if item.get(
+            "missing_client"
+        )
+    ]
+
+    focus_map = {}
+
+    for item in (
+        today_orders
+        + overdue_orders
+        + urgent_orders
+    ):
+        focus_map[
+            item[
+                "id"
+            ]
+        ] = item
+
+    focus_orders = sorted(
+        focus_map.values(),
+        key=_dashboard_order_sort_key,
+    )[:30]
+
+    attention = []
+
+    for item in overdue_orders:
+        attention.append(
+            {
+                "key": (
+                    f"overdue-"
+                    f"{item['id']}"
+                ),
+                "type":
+                    "overdue",
+                "severity":
+                    "danger",
+                "order_id":
+                    item[
+                        "id"
+                    ],
+                "title":
+                    (
+                        f"{item['order_number']} "
+                        f"po terminie"
+                    ),
+                "detail":
+                    (
+                        f"{item.get('client_name') or 'Bez klienta'}"
+                        f" · termin "
+                        f"{item.get('deadline') or 'brak'}"
+                    ),
+            }
+        )
+
+    for item in urgent_orders:
+        if item.get(
+            "is_overdue"
+        ):
+            continue
+
+        attention.append(
+            {
+                "key": (
+                    f"urgent-"
+                    f"{item['id']}"
+                ),
+                "type":
+                    "urgent",
+                "severity":
+                    "warning",
+                "order_id":
+                    item[
+                        "id"
+                    ],
+                "title":
+                    (
+                        f"{item['order_number']} "
+                        f"ma priorytet PILNY"
+                    ),
+                "detail":
+                    (
+                        item.get(
+                            "client_name"
+                        )
+                        or "Bez klienta"
+                    ),
+            }
+        )
+
+    for item in missing_svg_orders:
+        attention.append(
+            {
+                "key": (
+                    f"svg-"
+                    f"{item['id']}"
+                ),
+                "type":
+                    "missing_svg",
+                "severity":
+                    "warning",
+                "order_id":
+                    item[
+                        "id"
+                    ],
+                "title":
+                    (
+                        f"{item['order_number']} "
+                        f"nie ma SVG"
+                    ),
+                "detail":
+                    (
+                        item.get(
+                            "client_name"
+                        )
+                        or "Bez klienta"
+                    ),
+            }
+        )
+
+    for item in ready_orders:
+        if not item.get(
+            "is_unpaid"
+        ):
+            continue
+
+        attention.append(
+            {
+                "key": (
+                    f"ready-unpaid-"
+                    f"{item['id']}"
+                ),
+                "type":
+                    "ready_unpaid",
+                "severity":
+                    "danger",
+                "order_id":
+                    item[
+                        "id"
+                    ],
+                "title":
+                    (
+                        f"{item['order_number']} "
+                        f"gotowe, ale nieopłacone"
+                    ),
+                "detail":
+                    (
+                        f"Pozostało "
+                        f"{_ops_money(
+                            _ops_decimal(item.get('price'))
+                            - _ops_decimal(item.get('paid_amount'))
+                        ):.2f} zł"
+                    ),
+            }
+        )
+
+    for item in missing_client_orders:
+        attention.append(
+            {
+                "key": (
+                    f"client-"
+                    f"{item['id']}"
+                ),
+                "type":
+                    "missing_client",
+                "severity":
+                    "info",
+                "order_id":
+                    item[
+                        "id"
+                    ],
+                "title":
+                    (
+                        f"{item['order_number']} "
+                        f"nie ma przypisanej karty klienta"
+                    ),
+                "detail":
+                    (
+                        item.get(
+                            "client_name"
+                        )
+                        or "Brak nazwy klienta"
+                    ),
+            }
+        )
+
+    for material in low_stock:
+        attention.append(
+            {
+                "key": (
+                    f"material-"
+                    f"{material['id']}"
+                ),
+                "type":
+                    "low_stock",
+                "severity":
+                    "warning",
+                "material_id":
+                    material[
+                        "id"
+                    ],
+                "title":
+                    (
+                        f"Niski stan: "
+                        f"{material.get('name') or 'Materiał'}"
+                    ),
+                "detail":
+                    (
+                        f"{material.get('color_name') or ''}"
+                        f" · stan "
+                        f"{material.get('stock_length_m')} m"
+                        f" / próg "
+                        f"{material.get('threshold_m')} m"
+                    ).strip(
+                        " ·"
+                    ),
+            }
+        )
+
+    severity_weight = {
+        "danger": 0,
+        "warning": 1,
+        "info": 2,
+    }
+
+    attention = sorted(
+        attention,
+        key=lambda item: (
+            severity_weight.get(
+                item.get(
+                    "severity"
+                ),
+                3,
+            ),
+            item.get(
+                "title"
+            )
+            or "",
+        ),
+    )[:60]
+
+    today_revenue = sum(
+        (
+            _ops_decimal(
+                item.get(
+                    "price"
+                )
+            )
+            for item
+            in today_orders
+        ),
+        _OpsDecimal("0"),
+    )
+
+    today_profit = sum(
+        (
+            _ops_decimal(
+                item.get(
+                    "estimated_profit"
+                )
+            )
+            for item
+            in today_orders
+        ),
+        _OpsDecimal("0"),
+    )
+
+    return {
+        "generated_at":
+            datetime.now(),
+        "stats": {
+            "today":
+                len(
+                    today_orders
+                ),
+            "urgent":
+                len(
+                    urgent_orders
+                ),
+            "overdue":
+                len(
+                    overdue_orders
+                ),
+            "ready":
+                len(
+                    ready_orders
+                ),
+            "unpaid":
+                len(
+                    unpaid_orders
+                ),
+            "missing_svg":
+                len(
+                    missing_svg_orders
+                ),
+            "missing_client":
+                len(
+                    missing_client_orders
+                ),
+            "low_stock":
+                len(
+                    low_stock
+                ),
+            "attention_count":
+                len(
+                    attention
+                ),
+            "today_revenue":
+                _ops_money(
+                    today_revenue
+                ),
+            "today_profit":
+                _ops_money(
+                    today_profit
+                ),
+        },
+        "focus_orders":
+            focus_orders,
+        "attention":
+            attention,
+        "low_stock":
+            low_stock,
+    }
+
+
+@app.post(
+    "/orders/{order_id}/quick-action"
+)
+def run_dashboard_quick_action(
+    order_id: int,
+    data: DashboardQuickAction,
+    user: dict = Depends(
+        get_current_user
+    ),
+):
+    action = (
+        data.action
+        .strip()
+        .lower()
+    )
+
+    if (
+        action
+        not in _DASHBOARD_QUICK_ACTIONS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nieobsługiwana szybka akcja"
+            ),
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_ops_schema(
+                cur
+            )
+
+            _ensure_workflow_schema(
+                cur
+            )
+
+            order = get_order_or_404(
+                cur,
+                order_id,
+            )
+
+            message = ""
+
+            if action == "move_today":
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        production_bucket = 'today',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        order_id,
+                    ),
+                )
+
+                message = (
+                    "Przeniesiono na dziś"
+                )
+
+            elif action == "move_tomorrow":
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        production_bucket = 'tomorrow',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        order_id,
+                    ),
+                )
+
+                message = (
+                    "Przeniesiono na jutro"
+                )
+
+            elif action == "mark_paid":
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        paid_amount = price,
+                        payment_status = 'Opłacone',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        order_id,
+                    ),
+                )
+
+                message = (
+                    "Oznaczono jako opłacone"
+                )
+
+            elif action == "mark_ready":
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        status = 'Gotowe',
+                        fulfillment_status = 'ready',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        order_id,
+                    ),
+                )
+
+                message = (
+                    "Oznaczono jako gotowe"
+                )
+
+            elif action == "mark_fulfilled":
+                cur.execute(
+                    """
+                    UPDATE orders
+                    SET
+                        status = 'Zrealizowane',
+                        fulfillment_status = 'completed',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        order_id,
+                    ),
+                )
+
+                message = (
+                    "Oznaczono jako wydane / wysłane"
+                )
+
+            elif action == "next_status":
+                status_sequence = {
+                    "Nowe":
+                        "Projekt",
+                    "Projekt":
+                        "Produkcja",
+                    "Produkcja":
+                        "Gotowe",
+                    "Gotowe":
+                        "Zrealizowane",
+                }
+
+                current_status = str(
+                    order.get(
+                        "status"
+                    )
+                    or "Nowe"
+                )
+
+                next_status = (
+                    status_sequence.get(
+                        current_status
+                    )
+                )
+
+                if next_status is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Dla tego statusu nie ma kolejnego kroku"
+                        ),
+                    )
+
+                fulfillment_status = (
+                    "ready"
+                    if next_status
+                    == "Gotowe"
+                    else (
+                        "completed"
+                        if next_status
+                        == "Zrealizowane"
+                        else None
+                    )
+                )
+
+                if (
+                    fulfillment_status
+                    is None
+                ):
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET
+                            status = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (
+                            next_status,
+                            order_id,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET
+                            status = %s,
+                            fulfillment_status = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (
+                            next_status,
+                            fulfillment_status,
+                            order_id,
+                        ),
+                    )
+
+                message = (
+                    f"Status: "
+                    f"{next_status}"
+                )
+
+            result = get_order_or_404(
+                cur,
+                order_id,
+            )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "message":
+            message,
+        "order":
+            result,
+    }

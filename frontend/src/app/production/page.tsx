@@ -1,5 +1,7 @@
 "use client";
 
+import { SidebarAttentionBadge } from "../../components/sidebar-attention-badge";
+
 import { ProductionPlanningOverview } from "../../components/production-planning-overview";
 
 import { ProductionSvgBadge } from "../../components/production-svg-badge";
@@ -883,6 +885,7 @@ export default function ProductionPage() {
             )
           )}
         </nav>
+      <SidebarAttentionBadge />
 
         <div className="mt-auto space-y-2">
           <div className="rounded-2xl border border-white/[.06] bg-white/[.025] p-4">

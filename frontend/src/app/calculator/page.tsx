@@ -1,5 +1,7 @@
 "use client";
 
+import { SidebarAttentionBadge } from "../../components/sidebar-attention-badge";
+
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {

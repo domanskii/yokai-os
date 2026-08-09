@@ -1,5 +1,7 @@
 "use client";
 
+import { SidebarAttentionBadge } from "../../components/sidebar-attention-badge";
+
 import {
   useEffect,
   useState,
@@ -188,6 +190,7 @@ function Sidebar({
           }
         )}
       </nav>
+      <SidebarAttentionBadge />
 
       <div className="mt-auto p-5 text-[11px] text-white/20">
         YOKAI WRAP · private system

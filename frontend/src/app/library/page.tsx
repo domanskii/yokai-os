@@ -1,5 +1,7 @@
 "use client";
 
+import { SidebarAttentionBadge } from "../../components/sidebar-attention-badge";
+
 import {
   useEffect,
   useMemo,
@@ -927,6 +929,7 @@ export default function LibraryPage() {
             </button>
           ))}
         </nav>
+      <SidebarAttentionBadge />
 
         <div className="mt-auto space-y-2">
           <div className="rounded-2xl border border-white/[.06] bg-white/[.025] p-4">
