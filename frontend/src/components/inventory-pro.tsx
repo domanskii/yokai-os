@@ -483,7 +483,7 @@ export function InventoryPro() {
 
   return (
     <>
-      <section className="surface-card mt-5 overflow-hidden">
+      <section className="surface-card mt-5 overflow-hidden lg:ml-[250px] lg:mr-5">
         <div className="flex flex-col justify-between gap-4 border-b border-white/[.06] p-5 sm:flex-row sm:items-center">
           <div>
             <div className="flex items-center gap-2 font-semibold">
