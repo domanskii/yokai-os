@@ -2,7 +2,7 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "YOKAI OS",
+    name: "YOKAI OS — WRAP INTELLIGENCE",
     short_name: "YOKAI OS",
     description: "Prywatny system operacyjny YOKAI WRAP.",
     start_url: "/mobile",

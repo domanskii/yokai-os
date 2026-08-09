@@ -32,7 +32,7 @@ PaymentStatus = Literal[
     "Zwrot",
 ]
 
-app = FastAPI(title="YOKAI OS API", version="0.37.0")
+app = FastAPI(title="YOKAI OS API", version="0.37.4")
 
 
 class LoginRequest(BaseModel):
@@ -257,7 +257,7 @@ def startup():
 def root():
     return {
         "name": "YOKAI OS",
-        "version": "0.37.0",
+        "version": "0.37.4",
         "status": "running",
     }
 

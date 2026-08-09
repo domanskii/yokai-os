@@ -4,6 +4,13 @@ import Link from "next/link";
 import {
   Bell,
   Boxes,
+  Calculator,
+  FileBarChart,
+  HeartPulse,
+  Layers3,
+  Settings,
+  Sparkles,
+  Users,
   ChevronRight,
   CircleDollarSign,
   CloudOff,
@@ -99,11 +106,11 @@ function Metric({
 
 const quickLinks = [
   {
-    href: "/production-pro",
-    title: "Produkcja PRO",
+    href: "/",
+    title: "Dashboard",
     description:
-      "Start, czas, zużycie i zakończenie produkcji",
-    icon: Zap,
+      "Główny pulpit YOKAI OS",
+    icon: Home,
   },
   {
     href: "/orders",
@@ -113,6 +120,20 @@ const quickLinks = [
     icon: ShoppingBag,
   },
   {
+    href: "/production",
+    title: "Produkcja",
+    description:
+      "Kanban i statusy realizacji",
+    icon: Layers3,
+  },
+  {
+    href: "/production-pro",
+    title: "Produkcja PRO",
+    description:
+      "Czas, zużycie materiałów i realny zysk",
+    icon: Zap,
+  },
+  {
     href: "/notifications",
     title: "Powiadomienia",
     description:
@@ -120,11 +141,39 @@ const quickLinks = [
     icon: Bell,
   },
   {
-    href: "/materials",
-    title: "Magazyn",
+    href: "/calculator",
+    title: "Kalkulator",
     description:
-      "Stany folii i materiałów",
+      "Wycena naklejek i zapis kalkulacji",
+    icon: Calculator,
+  },
+  {
+    href: "/library",
+    title: "Biblioteka SVG",
+    description:
+      "Pliki i projekty produkcyjne",
+    icon: Boxes,
+  },
+  {
+    href: "/ai-studio",
+    title: "AI Studio",
+    description:
+      "Projekty AI i wersje koncepcji",
+    icon: Sparkles,
+  },
+  {
+    href: "/materials",
+    title: "Materiały",
+    description:
+      "Stany magazynowe i historia zużycia",
     icon: PackageOpen,
+  },
+  {
+    href: "/clients",
+    title: "Klienci",
+    description:
+      "Baza klientów i historia zamówień",
+    icon: Users,
   },
   {
     href: "/finance",
@@ -134,11 +183,25 @@ const quickLinks = [
     icon: CircleDollarSign,
   },
   {
-    href: "/library",
-    title: "Biblioteka SVG",
+    href: "/reports",
+    title: "Raporty",
     description:
-      "Pliki produkcyjne",
-    icon: Boxes,
+      "Obrót, marża, zysk i eksport CSV",
+    icon: FileBarChart,
+  },
+  {
+    href: "/settings",
+    title: "Ustawienia",
+    description:
+      "Koszty pracy i parametry YOKAI OS",
+    icon: Settings,
+  },
+  {
+    href: "/system",
+    title: "System i backup",
+    description:
+      "Stan usług i kopie bezpieczeństwa",
+    icon: HeartPulse,
   },
 ];
 
@@ -496,7 +559,7 @@ export default function MobilePage() {
       </div>
 
       <nav className="fixed inset-x-0 bottom-0 z-50 border-t border-white/[.07] bg-[#0a0e14]/95 px-3 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:left-[250px]">
-        <div className="mx-auto grid max-w-xl grid-cols-4">
+        <div className="mx-auto grid max-w-xl grid-cols-5">
           {[
             {
               href:
@@ -521,6 +584,14 @@ export default function MobilePage() {
                 "Zamówienia",
               icon:
                 ShoppingBag,
+            },
+            {
+              href:
+                "/calculator",
+              label:
+                "Kalkulator",
+              icon:
+                Calculator,
             },
             {
               href:
